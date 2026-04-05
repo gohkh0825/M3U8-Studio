@@ -1,0 +1,5 @@
+{
+  "name": "M3U8 Video Downloader",
+  "description": "A powerful web-based tool to download and convert M3U8 streams to MP4 files.",
+  "requestFramePermissions": []
+}
