@@ -225,31 +225,35 @@ async function startServer() {
 
       if (activeTasks.get(downloadId)?.isCancelled) return;
 
-      // 3. Merge segments using FFmpeg
+      // 3. Merge segments using binary concatenation (more robust for TS segments)
       io.emit(`download-progress-${downloadId}`, { percent: 85, message: '正在合并分片...' });
       
-      const fileListPath = path.join(taskTempDir, 'filelist.txt');
+      const mergedTsPath = path.join(taskTempDir, 'merged.ts');
+      const writeStream = fs.createWriteStream(mergedTsPath);
       
-      // Verify all segments exist and generate file list
-      const missingSegments: number[] = [];
-      const fileListEntries: string[] = [];
-      
-      for (let i = 0; i < segments.length; i++) {
-        const segmentPath = path.join(taskTempDir, `segment_${i.toString().padStart(5, '0')}.ts`);
-        if (await fs.pathExists(segmentPath)) {
-          // FFmpeg concat demuxer escaping: escape ' with \' and \ with \\
-          const escapedPath = segmentPath.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-          fileListEntries.push(`file '${escapedPath}'`);
-        } else {
-          missingSegments.push(i);
+      try {
+        for (let i = 0; i < segments.length; i++) {
+          const segmentPath = path.join(taskTempDir, `segment_${i.toString().padStart(5, '0')}.ts`);
+          if (!(await fs.pathExists(segmentPath))) {
+            throw new Error(`分片 ${i} 丢失，无法合并`);
+          }
+          
+          await new Promise((resolve, reject) => {
+            const readStream = fs.createReadStream(segmentPath);
+            readStream.pipe(writeStream, { end: false });
+            readStream.on('end', resolve);
+            readStream.on('error', reject);
+          });
         }
+        writeStream.end();
+        await new Promise((resolve, reject) => {
+          writeStream.on('finish', resolve);
+          writeStream.on('error', reject);
+        });
+      } catch (mergeErr) {
+        writeStream.destroy();
+        throw mergeErr;
       }
-
-      if (missingSegments.length > 0) {
-        throw new Error(`合并失败: 缺少 ${missingSegments.length} 个分片 (例如: ${missingSegments.slice(0, 3).join(', ')}...)`);
-      }
-
-      await fs.writeFile(fileListPath, fileListEntries.join('\n'));
 
       const command = ffmpeg();
       
@@ -259,19 +263,20 @@ async function startServer() {
         taskEntry.ffmpegCommand = command;
       }
 
-      command
-        .input(fileListPath)
-        .inputOptions(['-f', 'concat', '-safe', '0']);
+      command.input(mergedTsPath);
 
       if (videoCodec === 'copy') {
         command.outputOptions('-c copy');
       } else {
         command.videoCodec(videoCodec);
         if (videoBitrate) {
-          command.videoBitrate(videoBitrate);
+          // Ensure bitrate has 'k' if it's just a number string
+          const vb = /^\d+$/.test(videoBitrate) ? `${videoBitrate}k` : videoBitrate;
+          command.videoBitrate(vb);
         }
         if (audioBitrate) {
-          command.audioBitrate(audioBitrate);
+          const ab = /^\d+$/.test(audioBitrate) ? `${audioBitrate}k` : audioBitrate;
+          command.audioBitrate(ab);
         }
       }
 
