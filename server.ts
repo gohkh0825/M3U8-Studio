@@ -32,9 +32,10 @@ setInterval(async () => {
   }
 }, 1800000);
 
-if (ffmpegPath) {
-  ffmpeg.setFfmpegPath(ffmpegPath);
-}
+// We'll let fluent-ffmpeg find ffmpeg in the system path (installed via Dockerfile)
+// Only set it if it's not found or if we want to force ffmpeg-static
+// For now, let's just use the system one as it's more stable in this environment.
+// ffmpeg.setFfmpegPath(ffmpegPath); 
 
 async function startServer() {
   const app = express();
