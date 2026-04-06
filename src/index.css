@@ -21,6 +21,12 @@
   --color-dark-sidebar: #1a1c1e;
   --color-dark-card: #212426;
   --color-dark-border: #2d3135;
+
+  @keyframes spin-slow {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  --animate-spin-slow: spin-slow 8s linear infinite;
 }
 
 @layer base {

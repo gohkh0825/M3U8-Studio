@@ -335,22 +335,22 @@ export default function App() {
               </div>
 
               <div className="glass rounded-2xl p-8 space-y-6">
-                <h3 className="text-lg font-bold flex items-center gap-2">
-                  <Zap size={20} className="text-brand-400" />
-                  高级设置
+                <h3 className="text-lg font-bold flex items-center gap-2 text-rose-400">
+                  <Trash2 size={20} />
+                  危险区域
                 </h3>
                 <div className="space-y-4">
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">默认下载路径</label>
-                    <div className="flex gap-2">
-                      <input 
-                        type="text" 
-                        readOnly 
-                        value="/app/downloads" 
-                        className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-sm outline-none"
-                      />
-                      <button className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-xs font-bold transition-all">更改</button>
+                  <div className="flex items-center justify-between p-4 bg-rose-500/5 rounded-xl border border-rose-500/10">
+                    <div>
+                      <p className="text-sm font-bold text-rose-400">清除所有历史</p>
+                      <p className="text-xs text-slate-500">删除所有下载记录并停止正在进行的任务</p>
                     </div>
+                    <button 
+                      onClick={() => setShowClearConfirm(true)}
+                      className="px-4 py-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 rounded-lg text-xs font-bold transition-all border border-rose-500/20"
+                    >
+                      立即清除
+                    </button>
                   </div>
                 </div>
               </div>
@@ -494,17 +494,25 @@ export default function App() {
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative w-full max-w-xl bg-dark-sidebar border border-dark-border rounded-[2rem] shadow-2xl overflow-hidden"
+              className="relative w-full max-w-xl bg-dark-sidebar border border-dark-border rounded-[2rem] shadow-2xl overflow-hidden flex flex-col max-h-[85vh]"
             >
-              <div className="p-8 space-y-6">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xl font-bold">新建下载任务</h3>
-                  <button onClick={() => setShowNewDownloadModal(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors">
-                    <X size={20} />
-                  </button>
+              <div className="p-6 px-8 flex items-center justify-between border-b border-white/5 bg-dark-sidebar/50 backdrop-blur-md z-10">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-brand-500/10 flex items-center justify-center">
+                    <Plus size={20} className="text-brand-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold">新建下载任务</h3>
+                    <p className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">New Download Task</p>
+                  </div>
                 </div>
+                <button onClick={() => setShowNewDownloadModal(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors text-slate-400 hover:text-white">
+                  <X size={20} />
+                </button>
+              </div>
 
-                <form onSubmit={startDownload} className="space-y-6">
+              <div className="p-8 pt-6 overflow-y-auto custom-scrollbar flex-1">
+                <form onSubmit={startDownload} className="space-y-8 pb-10">
                   {/* Mode Switcher */}
                   <div className="flex p-1 bg-white/5 rounded-xl w-fit border border-white/5">
                     <button
@@ -588,15 +596,133 @@ export default function App() {
                     </div>
                   </div>
 
-                  <button
-                    type="submit"
-                    disabled={isSubmitting}
-                    className="w-full bg-brand-500 hover:bg-brand-600 disabled:bg-slate-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-brand-500/20 flex items-center justify-center gap-2"
-                  >
-                    {isSubmitting ? <Loader2 className="animate-spin" size={20} /> : <Download size={20} />}
-                    开始下载
-                  </button>
+                  <div className="pt-4 border-t border-white/5">
+                    <button
+                      type="button"
+                      onClick={() => setShowAdvanced(!showAdvanced)}
+                      className={`flex items-center justify-between w-full px-5 py-4 rounded-2xl text-sm font-bold transition-all border ${
+                        showAdvanced 
+                          ? 'bg-brand-500/10 border-brand-500/30 text-brand-400' 
+                          : 'bg-white/5 border-white/5 text-slate-400 hover:text-slate-200 hover:bg-white/10'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <Settings2 size={18} className={showAdvanced ? 'animate-spin-slow' : ''} />
+                        <span>高级选项 (标头/码率)</span>
+                      </div>
+                      <ChevronRight size={18} className={`transition-transform duration-300 ${showAdvanced ? 'rotate-90' : ''}`} />
+                    </button>
+
+                    <AnimatePresence>
+                      {showAdvanced && (
+                        <motion.div
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: 'auto', opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          transition={{ duration: 0.3, ease: "easeInOut" }}
+                          className="overflow-hidden"
+                        >
+                          <div className="pt-6 space-y-6">
+                            <div className="space-y-2">
+                              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">自定义标头 (Headers)</label>
+                              <textarea
+                                rows={3}
+                                placeholder="User-Agent: Mozilla/5.0&#10;Referer: https://example.com"
+                                className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:border-brand-500 outline-none text-sm font-mono placeholder:text-slate-700"
+                                value={customHeaders}
+                                onChange={(e) => setCustomHeaders(e.target.value)}
+                              />
+                              <p className="text-[10px] text-slate-600">每行一个，格式为 Key: Value</p>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
+                              <div className="space-y-2">
+                                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">视频码率 (kbps)</label>
+                                <input
+                                  type="number"
+                                  placeholder="例如: 2000"
+                                  className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:border-brand-500 outline-none text-sm placeholder:text-slate-700"
+                                  value={videoBitrate}
+                                  onChange={(e) => setVideoBitrate(e.target.value)}
+                                />
+                              </div>
+                              <div className="space-y-2">
+                                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">音频码率 (kbps)</label>
+                                <input
+                                  type="number"
+                                  placeholder="例如: 128"
+                                  className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:border-brand-500 outline-none text-sm placeholder:text-slate-700"
+                                  value={audioBitrate}
+                                  onChange={(e) => setAudioBitrate(e.target.value)}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
+                  <div className="pt-4 pb-2">
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      className="w-full bg-brand-500 hover:bg-brand-600 disabled:bg-slate-700 text-white font-bold py-4 rounded-2xl transition-all shadow-lg shadow-brand-500/20 flex items-center justify-center gap-3 group"
+                    >
+                      {isSubmitting ? (
+                        <Loader2 className="animate-spin" size={20} />
+                      ) : (
+                        <>
+                          <Download size={20} className="group-hover:translate-y-0.5 transition-transform" />
+                          <span>开始下载任务</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </form>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Clear Confirmation Modal */}
+      <AnimatePresence>
+        {showClearConfirm && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowClearConfirm(false)}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-sm bg-dark-sidebar border border-dark-border rounded-3xl shadow-2xl p-8 space-y-6"
+            >
+              <div className="w-16 h-16 bg-rose-500/10 rounded-full flex items-center justify-center mx-auto">
+                <AlertCircle size={32} className="text-rose-500" />
+              </div>
+              <div className="text-center space-y-2">
+                <h3 className="text-lg font-bold">确认清除所有记录？</h3>
+                <p className="text-sm text-slate-500">此操作将删除所有下载历史并停止正在进行的任务，且无法撤销。</p>
+              </div>
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => setShowClearConfirm(false)}
+                  className="flex-1 py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-bold transition-all"
+                >
+                  取消
+                </button>
+                <button 
+                  onClick={clearAll}
+                  className="flex-1 py-3 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-sm font-bold transition-all shadow-lg shadow-rose-500/20"
+                >
+                  确认清除
+                </button>
               </div>
             </motion.div>
           </div>

@@ -8,8 +8,19 @@ import ffmpegPath from 'ffmpeg-static';
 import fs from 'fs-extra';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
+import { execSync } from 'child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Check for system ffmpeg
+try {
+  const version = execSync('ffmpeg -version').toString();
+  console.log('FFmpeg found in system:', version.split('\n')[0]);
+} catch (err) {
+  console.warn('FFmpeg not found in system path, using ffmpeg-static');
+  ffmpeg.setFfmpegPath(ffmpegPath);
+}
+
 const downloadsDir = path.join(__dirname, 'downloads');
 const tempDir = path.join(__dirname, 'temp');
 
@@ -46,11 +57,6 @@ setInterval(async () => {
     console.error('Cleanup error:', err);
   }
 }, 1800000);
-
-// We'll let fluent-ffmpeg find ffmpeg in the system path (installed via Dockerfile)
-// Only set it if it's not found or if we want to force ffmpeg-static
-// For now, let's just use the system one as it's more stable in this environment.
-// ffmpeg.setFfmpegPath(ffmpegPath); 
 
 async function startServer() {
   const app = express();
@@ -101,7 +107,7 @@ async function startServer() {
 
   // API to start download
   app.post('/api/download', async (req, res) => {
-    const { url, filename, headers, format = 'mp4', videoBitrate, audioBitrate, videoCodec = 'libx264' } = req.body;
+    const { url, filename, headers, format = 'mp4', videoBitrate, audioBitrate, videoCodec = 'copy' } = req.body;
 
     if (!url) {
       return res.status(400).json({ error: 'URL is required' });
@@ -223,8 +229,27 @@ async function startServer() {
       io.emit(`download-progress-${downloadId}`, { percent: 85, message: '正在合并分片...' });
       
       const fileListPath = path.join(taskTempDir, 'filelist.txt');
-      const fileListContent = segmentFiles.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n');
-      await fs.writeFile(fileListPath, fileListContent);
+      
+      // Verify all segments exist and generate file list
+      const missingSegments: number[] = [];
+      const fileListEntries: string[] = [];
+      
+      for (let i = 0; i < segments.length; i++) {
+        const segmentPath = path.join(taskTempDir, `segment_${i.toString().padStart(5, '0')}.ts`);
+        if (await fs.pathExists(segmentPath)) {
+          // FFmpeg concat demuxer escaping: escape ' with \' and \ with \\
+          const escapedPath = segmentPath.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+          fileListEntries.push(`file '${escapedPath}'`);
+        } else {
+          missingSegments.push(i);
+        }
+      }
+
+      if (missingSegments.length > 0) {
+        throw new Error(`合并失败: 缺少 ${missingSegments.length} 个分片 (例如: ${missingSegments.slice(0, 3).join(', ')}...)`);
+      }
+
+      await fs.writeFile(fileListPath, fileListEntries.join('\n'));
 
       const command = ffmpeg();
       
@@ -236,10 +261,21 @@ async function startServer() {
 
       command
         .input(fileListPath)
-        .inputOptions(['-f', 'concat', '-safe', '0'])
-        .outputOptions('-c copy');
+        .inputOptions(['-f', 'concat', '-safe', '0']);
 
-      if (format === 'mp4') {
+      if (videoCodec === 'copy') {
+        command.outputOptions('-c copy');
+      } else {
+        command.videoCodec(videoCodec);
+        if (videoBitrate) {
+          command.videoBitrate(videoBitrate);
+        }
+        if (audioBitrate) {
+          command.audioBitrate(audioBitrate);
+        }
+      }
+
+      if (format === 'mp4' && videoCodec === 'copy') {
         command.outputOptions('-bsf:a aac_adtstoasc');
       }
 
