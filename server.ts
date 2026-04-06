@@ -107,7 +107,7 @@ async function startServer() {
 
   // API to start download
   app.post('/api/download', async (req, res) => {
-    const { url, filename, headers, format = 'mp4', videoBitrate, audioBitrate, videoCodec = 'copy' } = req.body;
+    const { url, filename, headers, format = 'mp4', videoBitrate, audioBitrate, videoCodec = 'copy', videoPreset = 'fast' } = req.body;
 
     if (!url) {
       return res.status(400).json({ error: 'URL is required' });
@@ -265,23 +265,41 @@ async function startServer() {
 
       command.input(mergedTsPath);
 
+      // Optimization: Use all available CPU cores
+      command.outputOptions('-threads 0');
+
       if (videoCodec === 'copy') {
         command.outputOptions('-c copy');
       } else {
         command.videoCodec(videoCodec);
+        
+        // Optimization: Set a default preset for x264/x265 for better speed/quality balance
+        if (videoCodec === 'libx264' || videoCodec === 'libx265') {
+          command.outputOptions(`-preset ${videoPreset}`);
+        }
+
         if (videoBitrate) {
-          // Ensure bitrate has 'k' if it's just a number string
           const vb = /^\d+$/.test(videoBitrate) ? `${videoBitrate}k` : videoBitrate;
           command.videoBitrate(vb);
         }
+        
+        // Optimization: Ensure audio is AAC for MP4 compatibility if re-encoding
+        if (format === 'mp4') {
+          command.audioCodec('aac');
+        }
+
         if (audioBitrate) {
           const ab = /^\d+$/.test(audioBitrate) ? `${audioBitrate}k` : audioBitrate;
           command.audioBitrate(ab);
         }
       }
 
-      if (format === 'mp4' && videoCodec === 'copy') {
-        command.outputOptions('-bsf:a aac_adtstoasc');
+      // Optimization: Add faststart for MP4 to allow web playback before full download
+      if (format === 'mp4') {
+        command.outputOptions('-movflags +faststart');
+        if (videoCodec === 'copy') {
+          command.outputOptions('-bsf:a aac_adtstoasc');
+        }
       }
 
       command

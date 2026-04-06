@@ -28,6 +28,7 @@ export default function App() {
   const [customHeaders, setCustomHeaders] = useState('');
   const [format, setFormat] = useState('mp4');
   const [videoCodec, setVideoCodec] = useState('copy');
+  const [videoPreset, setVideoPreset] = useState('fast');
   const [videoBitrate, setVideoBitrate] = useState('');
   const [audioBitrate, setAudioBitrate] = useState('');
   const [downloads, setDownloads] = useState<DownloadState[]>(() => {
@@ -141,6 +142,7 @@ export default function App() {
             headers, 
             format,
             videoCodec,
+            videoPreset,
             videoBitrate: videoBitrate ? `${videoBitrate}k` : undefined,
             audioBitrate: audioBitrate ? `${audioBitrate}k` : undefined
           }),
@@ -646,6 +648,28 @@ export default function App() {
                                   onChange={(e) => setVideoBitrate(e.target.value)}
                                 />
                               </div>
+                              <div className="space-y-2">
+                                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">编码预设 (Preset)</label>
+                                <select
+                                  disabled={videoCodec === 'copy'}
+                                  className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:border-brand-500 outline-none text-sm appearance-none disabled:opacity-50"
+                                  value={videoPreset}
+                                  onChange={(e) => setVideoPreset(e.target.value)}
+                                >
+                                  <option value="ultrafast">极快 (Ultrafast)</option>
+                                  <option value="superfast">超快 (Superfast)</option>
+                                  <option value="veryfast">非常快 (Veryfast)</option>
+                                  <option value="faster">更快 (Faster)</option>
+                                  <option value="fast">快 (Fast)</option>
+                                  <option value="medium">中等 (Medium)</option>
+                                  <option value="slow">慢 (Slow)</option>
+                                  <option value="slower">更慢 (Slower)</option>
+                                  <option value="veryslow">非常慢 (Veryslow)</option>
+                                </select>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4">
                               <div className="space-y-2">
                                 <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">音频码率 (kbps)</label>
                                 <input
