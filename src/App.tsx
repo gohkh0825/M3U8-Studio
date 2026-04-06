@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, Link as LinkIcon, FileVideo, CheckCircle2, AlertCircle, Loader2, Settings2, Trash2, Layers, Zap, ShieldCheck, ExternalLink, ArrowRight, Copy, X } from 'lucide-react';
+import { Download, Link as LinkIcon, FileVideo, CheckCircle2, AlertCircle, Loader2, Settings2, Trash2, Layers, Zap, ShieldCheck, ExternalLink, ArrowRight, Copy, X, List, CheckSquare, Plus, HelpCircle, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -10,12 +10,17 @@ interface DownloadState {
   status: 'idle' | 'downloading' | 'completed' | 'error';
   progress: number;
   timemark: string;
+  message?: string;
   error?: string;
   downloadUrl?: string;
   completedAt?: string;
 }
 
+type TabType = 'downloading' | 'completed' | 'settings';
+
 export default function App() {
+  const [activeTab, setActiveTab] = useState<TabType>('downloading');
+  const [showNewDownloadModal, setShowNewDownloadModal] = useState(false);
   const [isBatchMode, setIsBatchMode] = useState(false);
   const [url, setUrl] = useState('');
   const [filename, setFilename] = useState('');
@@ -54,19 +59,42 @@ export default function App() {
   }, []);
 
   const [showCopyToast, setShowCopyToast] = useState(false);
-
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   const clearCompleted = () => {
     setDownloads(prev => prev.filter(d => d.status !== 'completed' && d.status !== 'error'));
   };
 
-  const clearAll = () => {
+  const clearAll = async () => {
+    const activeDownloads = downloads.filter(d => d.status === 'downloading');
+    for (const task of activeDownloads) {
+      try {
+        await fetch('/api/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ downloadId: task.id }),
+        });
+      } catch (err) {
+        console.error(`Failed to cancel task ${task.id}:`, err);
+      }
+    }
     setDownloads([]);
     setShowClearConfirm(false);
   };
 
-  const removeTask = (id: string) => {
+  const removeTask = async (id: string) => {
+    const task = downloads.find(d => d.id === id);
+    if (task && task.status === 'downloading') {
+      try {
+        await fetch('/api/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ downloadId: id }),
+        });
+      } catch (err) {
+        console.error('Failed to cancel task:', err);
+      }
+    }
     setDownloads(prev => prev.filter(d => d.id !== id));
   };
 
@@ -133,9 +161,21 @@ export default function App() {
         const socket = socketRef.current;
         if (socket) {
           const dId = data.downloadId;
+          
+          socket.on(`download-start-${dId}`, (update) => {
+            setDownloads(prev => prev.map(d => 
+              d.id === dId ? { ...d, message: update.message } : d
+            ));
+          });
+
           socket.on(`download-progress-${dId}`, (update) => {
             setDownloads(prev => prev.map(d => 
-              d.id === dId ? { ...d, progress: update.percent || 0, timemark: update.timemark } : d
+              d.id === dId ? { 
+                ...d, 
+                progress: update.percent || 0, 
+                timemark: update.timemark || d.timemark,
+                message: update.message || d.message
+              } : d
             ));
           });
 
@@ -174,586 +214,409 @@ export default function App() {
       setFilename('');
     }
     setIsSubmitting(false);
+    setShowNewDownloadModal(false);
   };
 
-  return (
-    <div className="min-h-screen bg-[#f8fafc] text-slate-900 font-sans selection:bg-brand-100">
-      {/* Background Pattern */}
-      <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden">
-        <div className="absolute -top-[10%] -left-[10%] w-[40%] h-[40%] bg-brand-200/20 blur-[120px] rounded-full" />
-        <div className="absolute top-[20%] -right-[5%] w-[30%] h-[30%] bg-indigo-200/20 blur-[100px] rounded-full" />
-        <div className="absolute -bottom-[10%] left-[20%] w-[35%] h-[35%] bg-purple-200/20 blur-[110px] rounded-full" />
-        <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-[0.03] mix-blend-overlay" />
-      </div>
+  const filteredDownloads = downloads.filter(d => {
+    if (activeTab === 'downloading') return d.status === 'downloading' || d.status === 'idle' || d.status === 'error';
+    if (activeTab === 'completed') return d.status === 'completed';
+    return true;
+  });
 
-      <div className="relative z-10 max-w-6xl mx-auto px-6 py-12 lg:py-20">
-        {/* Navigation / Top Bar */}
-        <nav className="flex items-center justify-between mb-16">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-brand-600 rounded-xl flex items-center justify-center shadow-lg shadow-brand-200">
-              <Download className="text-white" size={20} />
-            </div>
-            <span className="text-xl font-display font-bold tracking-tight">M3U8 <span className="text-brand-600">Studio</span></span>
+  return (
+    <div className="flex h-screen bg-dark-bg text-slate-200 font-sans overflow-hidden">
+      {/* Sidebar */}
+      <aside className="w-64 bg-dark-sidebar border-r border-dark-border flex flex-col z-20">
+        <div className="p-6 flex items-center gap-3">
+          <div className="w-8 h-8 bg-brand-500 rounded-lg flex items-center justify-center shadow-lg shadow-brand-500/20">
+            <Download className="text-white" size={18} />
           </div>
-          <div className="flex items-center gap-6">
-            <a href="#" className="text-sm font-medium text-slate-500 hover:text-brand-600 transition-colors">文档</a>
-            <a href="#" className="text-sm font-medium text-slate-500 hover:text-brand-600 transition-colors">反馈</a>
-            <div className="h-4 w-px bg-slate-200" />
-            <div className="flex items-center gap-2 px-3 py-1.5 bg-white border border-slate-200 rounded-lg shadow-sm">
-              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Server Online</span>
-            </div>
-          </div>
+          <span className="text-lg font-bold tracking-tight">Media <span className="text-brand-400">Go</span></span>
+          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.5.0</span>
+        </div>
+
+        <nav className="flex-1 px-4 py-4 space-y-2">
+          <button
+            onClick={() => setActiveTab('downloading')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-bold transition-all ${
+              activeTab === 'downloading' 
+              ? 'bg-brand-500 text-white shadow-lg shadow-brand-500/20' 
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+            }`}
+          >
+            <Download size={18} />
+            下载列表
+          </button>
+          <button
+            onClick={() => setActiveTab('completed')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-bold transition-all ${
+              activeTab === 'completed' 
+              ? 'bg-brand-500 text-white shadow-lg shadow-brand-500/20' 
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+            }`}
+          >
+            <CheckSquare size={18} />
+            下载完成
+          </button>
+          <button
+            onClick={() => setActiveTab('settings')}
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-bold transition-all ${
+              activeTab === 'settings' 
+              ? 'bg-brand-500 text-white shadow-lg shadow-brand-500/20' 
+              : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+            }`}
+          >
+            <Settings2 size={18} />
+            软件设置
+          </button>
         </nav>
 
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-start">
-          {/* Left Column: Control Panel */}
-          <div className="lg:col-span-7 space-y-8">
-            <div className="space-y-6">
-              <motion.div
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                className="inline-flex items-center gap-2 px-3 py-1 bg-brand-50 border border-brand-100 rounded-full"
-              >
-                <Zap size={14} className="text-brand-600" />
-                <span className="text-[10px] font-black text-brand-700 uppercase tracking-widest">Next-Gen Downloader</span>
-              </motion.div>
-              <h1 className="text-6xl lg:text-7xl font-display font-bold text-slate-900 leading-[1] tracking-tight">
-                专业级视频流 <br />
-                <span className="text-transparent bg-clip-text bg-gradient-to-r from-brand-600 via-indigo-600 to-purple-600">抓取与转换</span>
-              </h1>
-              <p className="text-xl text-slate-500 max-w-xl leading-relaxed font-medium">
-                支持多任务并行、自定义标头伪装及多种编码格式。无论是单任务还是批量抓取，都能轻松应对。
-              </p>
-            </div>
+        <div className="p-6 border-t border-dark-border">
+          <div className="flex items-center gap-2 text-slate-500 hover:text-slate-300 cursor-pointer transition-colors">
+            <HelpCircle size={16} />
+            <span className="text-xs font-medium">使用帮助</span>
+          </div>
+        </div>
+      </aside>
 
-            <motion.div 
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="glass rounded-[2.5rem] p-8 lg:p-10"
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col relative overflow-hidden">
+        {/* Header */}
+        <header className="h-16 border-b border-dark-border flex items-center justify-between px-8 bg-dark-sidebar/50 backdrop-blur-md">
+          <div className="flex items-center gap-4">
+            <h2 className="text-sm font-bold text-slate-300">
+              {activeTab === 'downloading' ? '下载列表' : activeTab === 'completed' ? '下载完成' : '软件设置'}
+            </h2>
+          </div>
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => setShowNewDownloadModal(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-brand-500 hover:bg-brand-600 text-white rounded-lg text-xs font-bold transition-all shadow-lg shadow-brand-500/10"
             >
-              <form onSubmit={startDownload} className="space-y-8">
-                {/* Mode Switcher */}
-                <div className="flex p-1.5 bg-slate-100/80 backdrop-blur-sm rounded-2xl w-fit border border-slate-200/50">
-                  <button
-                    type="button"
-                    onClick={() => setIsBatchMode(false)}
-                    className={`px-8 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 ${!isBatchMode ? 'bg-white text-brand-600 shadow-md shadow-brand-500/10' : 'text-slate-500 hover:text-slate-700'}`}
+              <Plus size={16} />
+              新建下载
+            </button>
+          </div>
+        </header>
+
+        {/* Content Area */}
+        <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
+          {activeTab === 'settings' ? (
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="max-w-2xl space-y-8"
+            >
+              <div className="glass rounded-2xl p-8 space-y-6">
+                <h3 className="text-lg font-bold flex items-center gap-2">
+                  <Settings2 size={20} className="text-brand-400" />
+                  常规设置
+                </h3>
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between p-4 bg-white/5 rounded-xl border border-white/5">
+                    <div>
+                      <p className="text-sm font-bold">自动清理</p>
+                      <p className="text-xs text-slate-500">自动删除超过 1 小时的历史文件</p>
+                    </div>
+                    <div className="w-10 h-5 bg-brand-500 rounded-full relative cursor-pointer">
+                      <div className="absolute right-1 top-1 w-3 h-3 bg-white rounded-full" />
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between p-4 bg-white/5 rounded-xl border border-white/5">
+                    <div>
+                      <p className="text-sm font-bold">下载完成后通知</p>
+                      <p className="text-xs text-slate-500">在系统通知栏显示下载结果</p>
+                    </div>
+                    <div className="w-10 h-5 bg-slate-700 rounded-full relative cursor-pointer">
+                      <div className="absolute left-1 top-1 w-3 h-3 bg-white rounded-full" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="glass rounded-2xl p-8 space-y-6">
+                <h3 className="text-lg font-bold flex items-center gap-2">
+                  <Zap size={20} className="text-brand-400" />
+                  高级设置
+                </h3>
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">默认下载路径</label>
+                    <div className="flex gap-2">
+                      <input 
+                        type="text" 
+                        readOnly 
+                        value="/app/downloads" 
+                        className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2 text-sm outline-none"
+                      />
+                      <button className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-xs font-bold transition-all">更改</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          ) : (
+            <div className="space-y-6">
+              {/* List Header Actions */}
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-4">
+                  <label className="flex items-center gap-2 cursor-pointer group">
+                    <div className="w-4 h-4 border-2 border-slate-600 rounded group-hover:border-brand-500 transition-colors" />
+                    <span className="text-xs font-bold text-slate-400 group-hover:text-slate-200 transition-colors">全选</span>
+                  </label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={clearCompleted}
+                    className="px-3 py-1.5 text-[11px] font-bold text-slate-400 hover:text-slate-200 bg-white/5 hover:bg-white/10 rounded-lg border border-white/5 transition-all"
                   >
-                    单任务模式
+                    删除
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setIsBatchMode(true)}
-                    className={`px-8 py-2.5 rounded-xl text-sm font-bold transition-all duration-300 ${isBatchMode ? 'bg-white text-brand-600 shadow-md shadow-brand-500/10' : 'text-slate-500 hover:text-slate-700'}`}
+                  <button 
+                    className="px-3 py-1.5 text-[11px] font-bold text-slate-400 hover:text-slate-200 bg-white/5 hover:bg-white/10 rounded-lg border border-white/5 transition-all"
                   >
-                    批量模式
+                    取消
+                  </button>
+                </div>
+              </div>
+
+              {/* Task List */}
+              <div className="space-y-3">
+                <AnimatePresence initial={false} mode="popLayout">
+                  {filteredDownloads.length === 0 ? (
+                    <motion.div 
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="flex flex-col items-center justify-center py-40 text-slate-500"
+                    >
+                      <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-4">
+                        <Layers size={32} className="opacity-20" />
+                      </div>
+                      <p className="text-sm font-bold">暂无数据</p>
+                    </motion.div>
+                  ) : (
+                    filteredDownloads.map((download) => (
+                      <motion.div
+                        key={download.id}
+                        layout
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        className="group bg-dark-card border border-dark-border hover:border-brand-500/50 rounded-xl p-4 transition-all"
+                      >
+                        <div className="flex items-center gap-4">
+                          <div className="w-4 h-4 border-2 border-slate-700 rounded shrink-0" />
+                          
+                          <div className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center shrink-0">
+                            {download.status === 'completed' ? <CheckCircle2 size={20} className="text-emerald-500" /> :
+                             download.status === 'error' ? <AlertCircle size={20} className="text-rose-500" /> :
+                             <Loader2 className="animate-spin text-brand-400" size={20} />}
+                          </div>
+
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between mb-1">
+                              <h3 className="text-sm font-bold truncate pr-4">{download.filename}</h3>
+                              <span className="text-[10px] font-mono text-slate-500">{download.timemark}</span>
+                            </div>
+                            
+                            <div className="flex items-center gap-3">
+                              <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                                <motion.div 
+                                  className={`h-full ${download.status === 'completed' ? 'bg-emerald-500' : 'bg-brand-500'}`}
+                                  initial={{ width: 0 }}
+                                  animate={{ width: `${download.progress}%` }}
+                                />
+                              </div>
+                              <span className="text-[10px] font-bold w-8 text-right">{Math.round(download.progress)}%</span>
+                            </div>
+                            
+                            {download.message && download.status === 'downloading' && (
+                              <p className="text-[10px] text-slate-500 mt-1">{download.message}</p>
+                            )}
+                            {download.error && (
+                              <p className="text-[10px] text-rose-500 mt-1">{download.error}</p>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            {download.status === 'completed' && (
+                              <a 
+                                href={download.downloadUrl} 
+                                download 
+                                className="p-2 text-slate-400 hover:text-brand-400 transition-colors"
+                              >
+                                <Download size={16} />
+                              </a>
+                            )}
+                            <button 
+                              onClick={() => removeTask(download.id)}
+                              className="p-2 text-slate-400 hover:text-rose-400 transition-colors"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        </div>
+                      </motion.div>
+                    ))
+                  )}
+                </AnimatePresence>
+              </div>
+
+              {/* Pagination Placeholder */}
+              {filteredDownloads.length > 0 && (
+                <div className="flex justify-center gap-2 mt-8">
+                  <button className="p-1.5 rounded-lg bg-white/5 text-slate-500 hover:text-slate-200 transition-colors">
+                    <ChevronLeft size={16} />
+                  </button>
+                  <button className="w-8 h-8 rounded-lg bg-brand-500 text-white text-xs font-bold">1</button>
+                  <button className="p-1.5 rounded-lg bg-white/5 text-slate-500 hover:text-slate-200 transition-colors">
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </main>
+
+      {/* New Download Modal */}
+      <AnimatePresence>
+        {showNewDownloadModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowNewDownloadModal(false)}
+              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-xl bg-dark-sidebar border border-dark-border rounded-[2rem] shadow-2xl overflow-hidden"
+            >
+              <div className="p-8 space-y-6">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xl font-bold">新建下载任务</h3>
+                  <button onClick={() => setShowNewDownloadModal(false)} className="p-2 hover:bg-white/5 rounded-full transition-colors">
+                    <X size={20} />
                   </button>
                 </div>
 
-                <AnimatePresence mode="wait">
-                  {isBatchMode ? (
-                    <motion.div
-                      key="batch"
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: 10 }}
-                      className="space-y-3"
+                <form onSubmit={startDownload} className="space-y-6">
+                  {/* Mode Switcher */}
+                  <div className="flex p-1 bg-white/5 rounded-xl w-fit border border-white/5">
+                    <button
+                      type="button"
+                      onClick={() => setIsBatchMode(false)}
+                      className={`px-6 py-1.5 rounded-lg text-xs font-bold transition-all ${!isBatchMode ? 'bg-brand-500 text-white shadow-lg shadow-brand-500/20' : 'text-slate-500 hover:text-slate-300'}`}
                     >
-                      <label className="text-sm font-bold text-slate-700 flex items-center gap-2 ml-1">
-                        <Layers size={16} className="text-brand-500" />
-                        批量任务列表
-                      </label>
+                      单任务
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsBatchMode(true)}
+                      className={`px-6 py-1.5 rounded-lg text-xs font-bold transition-all ${isBatchMode ? 'bg-brand-500 text-white shadow-lg shadow-brand-500/20' : 'text-slate-500 hover:text-slate-300'}`}
+                    >
+                      批量模式
+                    </button>
+                  </div>
+
+                  {isBatchMode ? (
+                    <div className="space-y-2">
                       <textarea
                         required
-                        rows={6}
+                        rows={5}
                         placeholder="http://example.com/video1.m3u8 电影1&#10;http://example.com/video2.m3u8 电影2"
-                        className="w-full bg-white/50 border border-slate-200 rounded-2xl py-4 px-5 focus:outline-none focus:ring-4 focus:ring-brand-500/10 focus:border-brand-500 transition-all text-slate-800 placeholder:text-slate-400 text-sm font-mono leading-relaxed"
+                        className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:border-brand-500 outline-none text-sm font-mono"
                         value={batchInput}
                         onChange={(e) => setBatchInput(e.target.value)}
                       />
-                      <p className="text-[11px] text-slate-400 ml-1">格式：URL [空格] 视频名称 (每行一个)</p>
-                    </motion.div>
+                      <p className="text-[10px] text-slate-500">格式：URL [空格] 视频名称 (每行一个)</p>
+                    </div>
                   ) : (
-                    <motion.div
-                      key="single"
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: 10 }}
-                      className="space-y-5"
-                    >
-                      <div className="space-y-3">
-                        <label className="text-sm font-bold text-slate-700 flex items-center gap-2 ml-1">
-                          <LinkIcon size={16} className="text-brand-500" />
-                          视频源地址 (M3U8)
-                        </label>
-                        <div className="relative group">
-                          <input
-                            type="url"
-                            required
-                            placeholder="https://example.com/playlist.m3u8"
-                            className="w-full bg-white/50 border border-slate-200 rounded-2xl py-4 px-5 pr-12 focus:outline-none focus:ring-4 focus:ring-brand-500/10 focus:border-brand-500 transition-all text-slate-800 placeholder:text-slate-400"
-                            value={url}
-                            onChange={(e) => setUrl(e.target.value)}
-                          />
-                          <div className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-brand-500 transition-colors">
-                            <Zap size={20} />
-                          </div>
-                        </div>
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">视频源地址 (M3U8)</label>
+                        <input
+                          type="url"
+                          required
+                          placeholder="https://example.com/playlist.m3u8"
+                          className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:border-brand-500 outline-none text-sm"
+                          value={url}
+                          onChange={(e) => setUrl(e.target.value)}
+                        />
                       </div>
-                      <div className="space-y-3">
-                        <label className="text-sm font-bold text-slate-700 flex items-center gap-2 ml-1">
-                          <FileVideo size={16} className="text-brand-500" />
-                          保存文件名
-                        </label>
+                      <div className="space-y-2">
+                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">保存文件名</label>
                         <input
                           type="text"
-                          placeholder="留空将自动生成时间戳名称"
-                          className="w-full bg-white/50 border border-slate-200 rounded-2xl py-4 px-5 focus:outline-none focus:ring-4 focus:ring-brand-500/10 focus:border-brand-500 transition-all text-sm"
+                          placeholder="留空将自动生成名称"
+                          className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:border-brand-500 outline-none text-sm"
                           value={filename}
                           onChange={(e) => setFilename(e.target.value)}
                         />
                       </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                  <div className="space-y-3">
-                    <label className="text-sm font-bold text-slate-700 flex items-center gap-2 ml-1">
-                      <Settings2 size={16} className="text-brand-500" />
-                      输出容器格式
-                    </label>
-                    <select
-                      className="w-full bg-white/50 border border-slate-200 rounded-2xl py-4 px-5 focus:outline-none focus:ring-4 focus:ring-brand-500/10 focus:border-brand-500 transition-all text-sm appearance-none cursor-pointer"
-                      value={format}
-                      onChange={(e) => setFormat(e.target.value)}
-                    >
-                      <option value="mp4">MP4 (推荐 - 兼容性最佳)</option>
-                      <option value="mkv">MKV (支持多音轨/字幕)</option>
-                      <option value="ts">TS (原始流 - 无损转换)</option>
-                      <option value="mov">MOV (Apple 专用)</option>
-                    </select>
-                  </div>
-                  <div className="flex items-end">
-                    <button
-                      type="button"
-                      onClick={() => setShowAdvanced(!showAdvanced)}
-                      className={`w-full py-4 px-5 rounded-2xl border font-bold text-sm flex items-center justify-center gap-2 transition-all ${showAdvanced ? 'bg-brand-50 border-brand-200 text-brand-600' : 'bg-white border-slate-200 text-slate-600 hover:border-brand-300'}`}
-                    >
-                      <Settings2 size={18} className={showAdvanced ? 'animate-spin-slow' : ''} />
-                      {showAdvanced ? '收起高级设置' : '高级编码设置'}
-                    </button>
-                  </div>
-                </div>
-
-                <AnimatePresence>
-                  {showAdvanced && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: 'auto', opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      className="overflow-hidden"
-                    >
-                      <div className="p-6 bg-slate-50/50 rounded-3xl border border-slate-100 space-y-6">
-                        <div className="space-y-3">
-                          <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">附加请求标头 (Headers)</label>
-                          <textarea
-                            rows={3}
-                            placeholder="Origin: http://www.example.com&#10;Referer: http://www.example.com"
-                            className="w-full bg-white border border-slate-200 rounded-2xl py-3.5 px-4 text-sm focus:ring-4 focus:ring-brand-500/10 outline-none font-mono leading-relaxed"
-                            value={customHeaders}
-                            onChange={(e) => setCustomHeaders(e.target.value)}
-                          />
-                        </div>
-                        
-                        <div className="space-y-3">
-                          <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">视频编码器 (Codec)</label>
-                          <div className="grid grid-cols-3 gap-3">
-                            {[
-                              { id: 'copy', label: '直接流复制', desc: '极速/无损' },
-                              { id: 'libx264', label: 'H.264', desc: '高兼容' },
-                              { id: 'libx265', label: 'H.265/HEVC', desc: '高压缩' }
-                            ].map(codec => (
-                              <button
-                                key={codec.id}
-                                type="button"
-                                onClick={() => setVideoCodec(codec.id)}
-                                className={`p-3 rounded-2xl border text-left transition-all ${
-                                  videoCodec === codec.id 
-                                  ? 'bg-brand-600 border-brand-600 text-white shadow-md shadow-brand-100' 
-                                  : 'bg-white border-slate-200 text-slate-600 hover:border-brand-300'
-                                }`}
-                              >
-                                <div className="text-xs font-bold">{codec.label}</div>
-                                <div className={`text-[9px] mt-0.5 ${videoCodec === codec.id ? 'text-brand-100' : 'text-slate-400'}`}>{codec.desc}</div>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-6">
-                          <div className="space-y-3">
-                            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">视频码率 (Bitrate)</label>
-                            <div className="relative">
-                              <input
-                                type="number"
-                                placeholder="默认"
-                                className="w-full bg-white border border-slate-200 rounded-2xl py-3.5 px-4 pr-12 text-sm focus:ring-4 focus:ring-brand-500/10 outline-none"
-                                value={videoBitrate}
-                                onChange={(e) => setVideoBitrate(e.target.value)}
-                              />
-                              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-400">kbps</span>
-                            </div>
-                          </div>
-                          <div className="space-y-3">
-                            <label className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">音频码率 (Bitrate)</label>
-                            <div className="relative">
-                              <input
-                                type="number"
-                                placeholder="默认"
-                                className="w-full bg-white border border-slate-200 rounded-2xl py-3.5 px-4 pr-12 text-sm focus:ring-4 focus:ring-brand-500/10 outline-none"
-                                value={audioBitrate}
-                                onChange={(e) => setAudioBitrate(e.target.value)}
-                              />
-                              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-400">kbps</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-
-                <button
-                  type="submit"
-                  disabled={isSubmitting || (isBatchMode ? !batchInput.trim() : !url.trim())}
-                  className="group relative w-full bg-brand-600 hover:bg-brand-700 disabled:bg-slate-200 text-white font-bold py-5 rounded-2xl transition-all flex items-center justify-center gap-3 shadow-xl shadow-brand-200 active:scale-[0.98] overflow-hidden"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:animate-shimmer" />
-                  {isSubmitting ? <Loader2 className="animate-spin" size={24} /> : <Download size={24} />}
-                  <span className="text-xl tracking-tight">
-                    {isSubmitting ? '正在初始化队列...' : (isBatchMode ? '开始批量处理任务' : '立即开始下载')}
-                  </span>
-                  {!isSubmitting && <ArrowRight size={20} className="group-hover:translate-x-1 transition-transform" />}
-                </button>
-              </form>
-            </motion.div>
-
-            {/* Features Info */}
-            <div className="grid grid-cols-3 gap-6 pt-4">
-              {[
-                { icon: Zap, title: '极速抓取', desc: '多线程切片处理' },
-                { icon: ShieldCheck, title: '安全伪装', desc: '自定义标头支持' },
-                { icon: Layers, title: '批量处理', desc: '无上限任务队列' }
-              ].map((feature, i) => (
-                <div key={i} className="flex flex-col items-center text-center space-y-2">
-                  <div className="w-10 h-10 bg-white rounded-full flex items-center justify-center shadow-sm border border-slate-100">
-                    <feature.icon size={18} className="text-brand-600" />
-                  </div>
-                  <h3 className="text-xs font-bold text-slate-800">{feature.title}</h3>
-                  <p className="text-[10px] text-slate-400">{feature.desc}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Right Column: Task Queue */}
-          <div className="lg:col-span-5 space-y-6">
-            <div className="flex items-center justify-between px-4">
-              <div className="flex items-center gap-4">
-                <h2 className="text-3xl font-display font-bold text-slate-900">任务队列</h2>
-                <div className="relative">
-                  <div className="absolute inset-0 bg-brand-500 blur-md opacity-20 rounded-full" />
-                  <span className="relative bg-brand-600 text-white text-[11px] font-black px-3 py-1 rounded-full shadow-lg shadow-brand-200">
-                    {downloads.length}
-                  </span>
-                </div>
-              </div>
-              <div className="flex items-center gap-4">
-                {downloads.some(d => d.status === 'completed' || d.status === 'error') && (
-                  <button 
-                    onClick={clearCompleted}
-                    className="flex items-center gap-1.5 text-xs font-bold text-slate-400 hover:text-brand-600 transition-colors"
-                  >
-                    <CheckCircle2 size={14} />
-                    清空已完成
-                  </button>
-                )}
-                {downloads.length > 0 && (
-                  <div className="relative">
-                    <button 
-                      onClick={() => setShowClearConfirm(!showClearConfirm)}
-                      className="flex items-center gap-1.5 text-xs font-bold text-slate-400 hover:text-rose-500 transition-colors"
-                    >
-                      <Trash2 size={14} />
-                      全部清空
-                    </button>
-                    
-                    <AnimatePresence>
-                      {showClearConfirm && (
-                        <motion.div
-                          initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                          animate={{ opacity: 1, y: 0, scale: 1 }}
-                          exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                          className="absolute right-0 top-full mt-2 w-48 bg-white rounded-2xl shadow-2xl border border-slate-100 p-4 z-50"
-                        >
-                          <p className="text-xs font-bold text-slate-700 mb-3 text-center">确定清空所有任务？</p>
-                          <div className="flex gap-2">
-                            <button 
-                              onClick={() => setShowClearConfirm(false)}
-                              className="flex-1 py-1.5 bg-slate-100 text-slate-600 text-[10px] font-bold rounded-lg hover:bg-slate-200 transition-colors"
-                            >
-                              取消
-                            </button>
-                            <button 
-                              onClick={clearAll}
-                              className="flex-1 py-1.5 bg-rose-500 text-white text-[10px] font-bold rounded-lg hover:bg-rose-600 transition-colors"
-                            >
-                              确定
-                            </button>
-                          </div>
-                        </motion.div>
-                      )}
-                    </AnimatePresence>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="space-y-4 max-h-[800px] overflow-y-auto pr-2 custom-scrollbar pb-10">
-              <AnimatePresence initial={false} mode="popLayout">
-                {downloads.length === 0 ? (
-                    <motion.div 
-                      initial={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      className="text-center py-32 glass rounded-[2.5rem] text-slate-400 border-2 border-dashed border-slate-200/50"
-                    >
-                    <div className="mb-4 flex justify-center">
-                      <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center">
-                        <FileVideo size={32} className="opacity-20" />
-                      </div>
                     </div>
-                    <p className="text-sm font-bold text-slate-500">队列空空如也</p>
-                    <p className="text-xs mt-1.5">在左侧添加任务开始您的下载之旅</p>
-                  </motion.div>
-                ) : (
-                  downloads.map((download) => (
-                    <motion.div
-                      key={download.id}
-                      layout
-                      initial={{ opacity: 0, x: 30 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, scale: 0.9, x: 20 }}
-                      className="glass rounded-3xl p-6 group relative overflow-hidden"
-                    >
-                      {/* Progress Background Glow */}
-                      {download.status === 'downloading' && (
-                        <div 
-                          className="absolute inset-0 bg-brand-500/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
-                          style={{ clipPath: `inset(0 ${100 - download.progress}% 0 0)` }}
-                        />
-                      )}
+                  )}
 
-                      <div className="flex items-start justify-between gap-4 mb-6 relative z-10">
-                        <div className="flex items-center gap-4">
-                          <div className={`w-14 h-14 rounded-2xl flex items-center justify-center transition-all shadow-sm ${
-                            download.status === 'completed' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' :
-                            download.status === 'error' ? 'bg-rose-50 text-rose-600 border border-rose-100' :
-                            'bg-brand-50 text-brand-600 border border-brand-100'
-                          }`}>
-                            {download.status === 'completed' ? <CheckCircle2 size={28} /> :
-                             download.status === 'error' ? <AlertCircle size={28} /> :
-                             <Loader2 className="animate-spin" size={28} />}
-                          </div>
-                          <div className="min-w-0">
-                            <h3 className="font-bold text-base text-slate-800 truncate max-w-[220px]" title={download.url}>
-                              {download.filename || '未命名任务'}
-                            </h3>
-                            <div className="flex items-center gap-2 mt-1.5">
-                              <span className={`text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded-md ${
-                                download.status === 'completed' ? 'bg-emerald-100 text-emerald-700' :
-                                download.status === 'error' ? 'bg-rose-100 text-rose-700' : 'bg-brand-100 text-brand-700'
-                              }`}>
-                                {download.status === 'completed' ? 'Success' :
-                                 download.status === 'error' ? 'Failed' : 'Downloading'}
-                              </span>
-                              {download.completedAt && (
-                                <>
-                                  <div className="w-1 h-1 rounded-full bg-slate-300" />
-                                  <span className="text-[10px] text-slate-400 font-bold">
-                                    {download.completedAt}
-                                  </span>
-                                </>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                        
-                        <div className="flex items-center gap-2">
-                          {download.status === 'completed' && (
-                            <button
-                              onClick={() => copyToClipboard(download.url)}
-                              className="p-2 text-slate-400 hover:text-brand-600 hover:bg-brand-50 rounded-xl transition-all"
-                              title="复制源链接"
-                            >
-                              <Copy size={16} />
-                            </button>
-                          )}
-                          <button
-                            onClick={() => removeTask(download.id)}
-                            className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-all"
-                            title="移除任务"
-                          >
-                            <X size={18} />
-                          </button>
-                        </div>
-                      </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">格式</label>
+                      <select
+                        className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:border-brand-500 outline-none text-sm appearance-none"
+                        value={format}
+                        onChange={(e) => setFormat(e.target.value)}
+                      >
+                        <option value="mp4">MP4</option>
+                        <option value="mkv">MKV</option>
+                        <option value="ts">TS</option>
+                      </select>
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">编码</label>
+                      <select
+                        className="w-full bg-white/5 border border-white/10 rounded-xl py-3 px-4 focus:border-brand-500 outline-none text-sm appearance-none"
+                        value={videoCodec}
+                        onChange={(e) => setVideoCodec(e.target.value)}
+                      >
+                        <option value="copy">流复制 (极速)</option>
+                        <option value="libx264">H.264</option>
+                        <option value="libx265">H.265</option>
+                      </select>
+                    </div>
+                  </div>
 
-                      {(download.status === 'downloading' || download.status === 'completed') && (
-                        <div className="space-y-4 relative z-10">
-                          <div className="flex justify-between items-end">
-                            <div className="space-y-1">
-                              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Progress</p>
-                              <div className="flex items-baseline gap-1">
-                                <span className={`text-2xl font-display font-bold ${download.status === 'completed' ? 'text-emerald-600' : 'text-slate-900'}`}>
-                                  {download.status === 'completed' ? '100' : Math.round(download.progress) || 0}
-                                </span>
-                                <span className="text-xs font-bold text-slate-400">%</span>
-                              </div>
-                            </div>
-                            <div className="text-right space-y-1">
-                              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                                {download.status === 'completed' ? 'Duration' : 'Elapsed'}
-                              </p>
-                              <p className="text-sm font-bold text-slate-700 font-mono">{download.timemark}</p>
-                            </div>
-                          </div>
-                          
-                          <div className="h-2.5 w-full bg-slate-100/50 rounded-full overflow-hidden relative shadow-inner border border-slate-200/50">
-                            {download.status === 'downloading' && (
-                              <motion.div 
-                                className="absolute inset-0 bg-gradient-to-r from-transparent via-white/40 to-transparent w-1/2 z-10"
-                                animate={{ x: ['-100%', '200%'] }}
-                                transition={{ repeat: Infinity, duration: 2, ease: "linear" }}
-                              />
-                            )}
-                            
-                            <motion.div 
-                              className={`h-full relative z-0 rounded-full shadow-sm ${
-                                download.status === 'completed' ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : 'bg-gradient-to-r from-brand-500 to-indigo-500'
-                              }`}
-                              initial={{ width: 0 }}
-                              animate={{ 
-                                width: download.status === 'completed' ? '100%' : `${download.progress || 2}%` 
-                              }}
-                              transition={{ type: 'spring', bounce: 0, duration: 0.8 }}
-                            >
-                              {download.status === 'downloading' && !download.progress && (
-                                <motion.div 
-                                  className="absolute inset-0 bg-white/20"
-                                  animate={{ opacity: [0, 1, 0] }}
-                                  transition={{ repeat: Infinity, duration: 1.5 }}
-                                />
-                              )}
-                            </motion.div>
-                          </div>
-
-                          {download.status === 'completed' && (
-                            <motion.a
-                              whileHover={{ scale: 1.02, y: -2 }}
-                              whileTap={{ scale: 0.98 }}
-                              href={download.downloadUrl}
-                              download
-                              className="w-full flex items-center justify-center gap-2 py-3.5 bg-brand-600 text-white text-sm font-bold rounded-2xl shadow-lg shadow-brand-200 hover:bg-brand-700 transition-all mt-2"
-                            >
-                              <ExternalLink size={18} />
-                              保存视频文件
-                            </motion.a>
-                          )}
-                        </div>
-                      )}
-
-                      {download.status === 'error' && (
-                        <div className="mt-2 flex items-start gap-3 bg-rose-50/50 p-4 rounded-2xl border border-rose-100/50">
-                          <AlertCircle size={16} className="text-rose-500 shrink-0 mt-0.5" />
-                          <p className="text-xs text-rose-600 font-medium leading-relaxed">
-                            {download.error}
-                          </p>
-                        </div>
-                      )}
-                    </motion.div>
-                  ))
-                )}
-              </AnimatePresence>
-            </div>
+                  <button
+                    type="submit"
+                    disabled={isSubmitting}
+                    className="w-full bg-brand-500 hover:bg-brand-600 disabled:bg-slate-700 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-brand-500/20 flex items-center justify-center gap-2"
+                  >
+                    {isSubmitting ? <Loader2 className="animate-spin" size={20} /> : <Download size={20} />}
+                    开始下载
+                  </button>
+                </form>
+              </div>
+            </motion.div>
           </div>
-        </div>
+        )}
+      </AnimatePresence>
 
-        {/* Footer */}
-        <footer className="mt-32 pt-10 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-6">
-          <div className="flex items-center gap-2 text-slate-400 text-xs font-medium">
-            <span>© 2026 M3U8 Studio Pro</span>
-            <div className="w-1 h-1 rounded-full bg-slate-300" />
-            <span>极速、安全、专业</span>
-          </div>
-          <div className="flex items-center gap-8">
-            <div className="flex items-center gap-2">
-              <ShieldCheck size={14} className="text-emerald-500" />
-              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Privacy Guaranteed</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Zap size={14} className="text-amber-500" />
-              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Auto-Cleanup Enabled</span>
-            </div>
-          </div>
-        </footer>
-      </div>
-
+      {/* Toast */}
       <AnimatePresence>
         {showCopyToast && (
           <motion.div
             initial={{ opacity: 0, y: 20, x: '-50%' }}
             animate={{ opacity: 1, y: 0, x: '-50%' }}
             exit={{ opacity: 0, y: 20, x: '-50%' }}
-            className="fixed bottom-10 left-1/2 z-50 bg-slate-900 text-white px-6 py-3 rounded-2xl shadow-2xl flex items-center gap-3 border border-white/10 backdrop-blur-xl"
+            className="fixed bottom-10 left-1/2 z-[100] bg-brand-500 text-white px-6 py-3 rounded-xl shadow-2xl flex items-center gap-3"
           >
-            <div className="w-6 h-6 bg-emerald-500 rounded-full flex items-center justify-center">
-              <CheckCircle2 size={14} />
-            </div>
-            <span className="text-sm font-bold tracking-tight">链接已复制到剪贴板</span>
+            <CheckCircle2 size={18} />
+            <span className="text-sm font-bold">链接已复制</span>
           </motion.div>
         )}
       </AnimatePresence>
-
-      <style dangerouslySetInnerHTML={{ __html: `
-        @keyframes shimmer {
-          100% { transform: translateX(100%); }
-        }
-        .animate-shimmer {
-          animation: shimmer 2s infinite;
-        }
-        .animate-spin-slow {
-          animation: spin 3s linear infinite;
-        }
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 5px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: #e2e8f0;
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: #cbd5e1;
-        }
-      `}} />
     </div>
   );
 }
