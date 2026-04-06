@@ -105,12 +105,17 @@ async function startServer() {
     }
   });
 
-  // API to start download
+    // API to start download
   app.post('/api/download', async (req, res) => {
-    const { url, filename, headers, format = 'mp4', videoBitrate, audioBitrate, videoCodec = 'copy', videoPreset = 'fast' } = req.body;
+    let { url, filename, headers, format = 'mp4', videoBitrate, audioBitrate, videoCodec = 'copy', videoPreset = 'fast' } = req.body;
 
     if (!url) {
       return res.status(400).json({ error: 'URL is required' });
+    }
+
+    // Fix common encoding issue: &timestamp being converted to ×tamp
+    if (url.includes('×tamp=')) {
+      url = url.replace(/×tamp=/g, '&timestamp=');
     }
 
     const extension = format.startsWith('.') ? format : `.${format}`;
@@ -131,7 +136,20 @@ async function startServer() {
       io.emit(`download-start-${downloadId}`, { message: '正在解析 M3U8 列表...' });
 
       // 1. Fetch and parse M3U8
-      const axiosHeaders: Record<string, string> = {};
+      const axiosHeaders: Record<string, string> = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+      };
+
+      try {
+        const urlObj = new URL(url);
+        axiosHeaders['Referer'] = urlObj.origin + '/';
+        axiosHeaders['Origin'] = urlObj.origin;
+      } catch (e) {
+        console.warn('Invalid URL for Referer:', url);
+      }
+
       if (headers) {
         headers.split('\r\n').forEach((line: string) => {
           const [key, ...valueParts] = line.split(':');
@@ -143,7 +161,8 @@ async function startServer() {
 
       const response = await axios.get(url, { 
         headers: axiosHeaders,
-        signal: abortController.signal 
+        signal: abortController.signal,
+        timeout: 15000
       });
       
       if (activeTasks.get(downloadId)?.isCancelled) return;
@@ -193,25 +212,33 @@ async function startServer() {
               timeout: 30000,
               signal: abortController.signal
             });
+            if (segResponse.data.length === 0) throw new Error('Empty segment');
             await fs.writeFile(segmentPath, segResponse.data);
             segmentFiles[segmentIndex] = segmentPath;
           } catch (err) {
             if (axios.isCancel(err) || abortController.signal.aborted) return;
             
-            console.error(`Failed to download segment ${segmentIndex}:`, err.message);
+            const status = err.response?.status;
+            console.error(`Failed to download segment ${segmentIndex} (Status: ${status}):`, err.message);
+            
+            if (status === 403) {
+              throw new Error(`分片 ${segmentIndex} 下载被拒绝 (403)。请尝试在高级选项中添加正确的请求头 (Referer/User-Agent)。`);
+            }
+
             // Retry once
             try {
+              await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s before retry
               const segResponse = await axios.get(segmentUrl, { 
                 headers: axiosHeaders,
                 responseType: 'arraybuffer',
-                timeout: 30000,
+                timeout: 45000,
                 signal: abortController.signal
               });
               await fs.writeFile(segmentPath, segResponse.data);
               segmentFiles[segmentIndex] = segmentPath;
             } catch (retryErr) {
               if (axios.isCancel(retryErr) || abortController.signal.aborted) return;
-              throw new Error(`分片 ${segmentIndex} 下载失败: ${retryErr.message}`);
+              throw new Error(`分片 ${segmentIndex} 下载失败 (重试后): ${retryErr.message}`);
             }
           }
         }));
@@ -273,6 +300,9 @@ async function startServer() {
       } else {
         command.videoCodec(videoCodec);
         
+        // Ensure compatibility with most players
+        command.outputOptions('-pix_fmt yuv420p');
+        
         // Optimization: Set a default preset for x264/x265 for better speed/quality balance
         if (videoCodec === 'libx264' || videoCodec === 'libx265') {
           command.outputOptions(`-preset ${videoPreset}`);
@@ -314,13 +344,15 @@ async function startServer() {
             message: '正在合并视频流...'
           });
         })
-        .on('error', (err) => {
+        .on('error', (err, stdout, stderr) => {
           if (activeTasks.get(downloadId)?.isCancelled) {
             console.log(`Ffmpeg process for ${downloadId} was killed (cancelled)`);
             return;
           }
           console.error('Merge error:', err.message);
-          io.emit(`download-error-${downloadId}`, { error: `合并失败: ${err.message}` });
+          if (stderr) console.error('FFmpeg stderr:', stderr);
+          const errorMsg = stderr ? stderr.split('\n').filter(l => l.trim()).pop() : err.message;
+          io.emit(`download-error-${downloadId}`, { error: `合并失败: ${errorMsg}` });
           fs.remove(taskTempDir).catch(console.error);
           activeTasks.delete(downloadId);
         })

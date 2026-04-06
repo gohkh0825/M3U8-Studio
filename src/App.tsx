@@ -132,12 +132,18 @@ export default function App() {
     setIsSubmitting(true);
     
     for (const task of tasks) {
+      let processedUrl = task.url.trim();
+      // Fix common encoding issue: &timestamp being converted to ×tamp
+      if (processedUrl.includes('×tamp=')) {
+        processedUrl = processedUrl.replace(/×tamp=/g, '&timestamp=');
+      }
+
       try {
         const response = await fetch('/api/download', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
-            url: task.url, 
+            url: processedUrl, 
             filename: task.filename, 
             headers, 
             format,
