@@ -105,6 +105,7 @@ async function startServer() {
       message: string;
       timemark: string;
       logs: any[];
+      options?: any;
     }
   }>();
 
@@ -158,7 +159,7 @@ async function startServer() {
 
     // API to start download
   app.post('/api/download', async (req, res) => {
-    let { url, filename, headers, format = 'mp4', videoBitrate, audioBitrate, videoCodec = 'copy', videoPreset = 'fast' } = req.body;
+    let { url, filename, headers, format = 'mp4', videoBitrate, audioBitrate, videoCodec = 'copy', videoPreset = 'fast', downloadId: existingId } = req.body;
 
     if (!url) {
       return res.status(400).json({ error: 'URL is required' });
@@ -173,8 +174,12 @@ async function startServer() {
     const timestamp = Date.now();
     const safeFilename = (filename || `video_${timestamp}`).replace(/[^a-z0-9\u4e00-\u9fa5]/gi, '_').toLowerCase() + extension;
     const outputPath = path.join(downloadsDir, safeFilename);
-    const downloadId = timestamp.toString();
+    const downloadId = existingId || timestamp.toString();
     const taskTempDir = path.join(tempDir, downloadId);
+    
+    // Cleanup temp dir if it exists (for retries)
+    await fs.remove(taskTempDir).catch(console.error);
+    await fs.ensureDir(taskTempDir);
 
     // Initialize task tracking
     const abortController = new AbortController();
@@ -184,7 +189,8 @@ async function startServer() {
       progress: 0,
       message: '正在解析 M3U8 列表...',
       timemark: '00:00:00',
-      logs: [] as any[]
+      logs: [] as any[],
+      options: { headers, format, videoBitrate, audioBitrate, videoCodec, videoPreset }
     };
     
     activeTasks.set(downloadId, { abortController, isCancelled: false, metadata });
@@ -453,6 +459,7 @@ async function startServer() {
           if (activeTasks.get(downloadId)?.isCancelled) {
             sendLog('任务已取消', 'warning');
             await saveToHistory({ id: downloadId, ...metadata, status: 'cancelled' });
+            io.emit(`download-cancelled-${downloadId}`);
             console.log(`Ffmpeg process for ${downloadId} was killed (cancelled)`);
             return;
           }

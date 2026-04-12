@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Download, Link as LinkIcon, FileVideo, CheckCircle2, AlertCircle, Loader2, Settings2, Trash2, Layers, Zap, ShieldCheck, ExternalLink, ArrowRight, Copy, X, List, CheckSquare, Plus, HelpCircle, ChevronLeft, ChevronRight, Search } from 'lucide-react';
+import { Download, Link as LinkIcon, FileVideo, CheckCircle2, AlertCircle, Loader2, Settings2, Trash2, Layers, Zap, ShieldCheck, ExternalLink, ArrowRight, Copy, X, List, CheckSquare, Plus, HelpCircle, ChevronLeft, ChevronRight, Search, RotateCcw } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -13,7 +13,7 @@ interface DownloadState {
   id: string;
   url: string;
   filename: string;
-  status: 'idle' | 'downloading' | 'completed' | 'error';
+  status: 'idle' | 'downloading' | 'completed' | 'error' | 'cancelled';
   progress: number;
   timemark: string;
   message?: string;
@@ -21,6 +21,14 @@ interface DownloadState {
   downloadUrl?: string;
   completedAt?: string;
   logs?: DownloadLog[];
+  options?: {
+    headers?: string;
+    format?: string;
+    videoCodec?: string;
+    videoPreset?: string;
+    videoBitrate?: string;
+    audioBitrate?: string;
+  };
 }
 
 type TabType = 'downloading' | 'completed' | 'settings';
@@ -128,6 +136,17 @@ export default function App() {
         } : d
       ));
     });
+
+    socket.on(`download-cancelled-${dId}`, () => {
+      setDownloads(prev => prev.map(d => 
+        d.id === dId ? { 
+          ...d, 
+          status: 'cancelled',
+          message: '任务已取消',
+          completedAt: new Date().toLocaleString('zh-CN')
+        } : d
+      ));
+    });
   };
 
   const [showCopyToast, setShowCopyToast] = useState(false);
@@ -185,6 +204,47 @@ export default function App() {
       setDownloads(prev => prev.filter(d => d.id !== id));
     } catch (err) {
       console.error('Failed to delete task:', err);
+    }
+  };
+
+  const retryTask = async (id: string) => {
+    const task = downloads.find(d => d.id === id);
+    if (!task) return;
+
+    // Reset task state locally
+    setDownloads(prev => prev.map(d => 
+      d.id === id ? { 
+        ...d, 
+        status: 'downloading', 
+        progress: 0, 
+        error: undefined, 
+        message: '正在重新启动...',
+        logs: [] 
+      } : d
+    ));
+
+    try {
+      const response = await fetch('/api/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          url: task.url, 
+          filename: task.filename, 
+          downloadId: id,
+          ...(task.options || {})
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || '重试失败');
+      }
+
+      attachTaskListeners(id);
+    } catch (err: any) {
+      setDownloads(prev => prev.map(d => 
+        d.id === id ? { ...d, status: 'error', error: err.message } : d
+      ));
     }
   };
 
@@ -251,6 +311,14 @@ export default function App() {
           status: 'downloading',
           progress: 0,
           timemark: '00:00:00',
+          options: {
+            headers,
+            format,
+            videoCodec,
+            videoPreset,
+            videoBitrate: videoBitrate ? `${videoBitrate}k` : undefined,
+            audioBitrate: audioBitrate ? `${audioBitrate}k` : undefined
+          }
         };
 
         setDownloads(prev => [newDownload, ...prev]);
@@ -271,7 +339,7 @@ export default function App() {
   };
 
   const filteredDownloads = downloads.filter(d => {
-    if (activeTab === 'downloading') return d.status === 'downloading' || d.status === 'idle' || d.status === 'error';
+    if (activeTab === 'downloading') return d.status === 'downloading' || d.status === 'idle' || d.status === 'error' || d.status === 'cancelled';
     if (activeTab === 'completed') return d.status === 'completed';
     return true;
   });
@@ -499,6 +567,15 @@ export default function App() {
                             >
                               <List size={16} />
                             </button>
+                            {(download.status === 'error' || download.status === 'cancelled') && (
+                              <button 
+                                onClick={() => retryTask(download.id)}
+                                className="p-2 text-slate-400 hover:text-amber-400 transition-colors"
+                                title="重试任务"
+                              >
+                                <RotateCcw size={16} />
+                              </button>
+                            )}
                             {download.status === 'completed' && (
                               <a 
                                 href={download.downloadUrl} 
