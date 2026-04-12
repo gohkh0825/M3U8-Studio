@@ -23,10 +23,44 @@ try {
 
 const downloadsDir = path.join(__dirname, 'downloads');
 const tempDir = path.join(__dirname, 'temp');
+const historyFile = path.join(__dirname, 'history.json');
 
-// Ensure directories exist
+// Ensure directories and history file exist
 fs.ensureDirSync(downloadsDir);
 fs.ensureDirSync(tempDir);
+if (!fs.existsSync(historyFile)) {
+  fs.writeJsonSync(historyFile, []);
+}
+
+// Helper to manage history
+async function getHistory() {
+  try {
+    return await fs.readJson(historyFile);
+  } catch (err) {
+    return [];
+  }
+}
+
+async function saveToHistory(task: any) {
+  const history = await getHistory();
+  const index = history.findIndex((t: any) => t.id === task.id);
+  if (index >= 0) {
+    history[index] = { ...history[index], ...task };
+  } else {
+    history.unshift(task);
+  }
+  await fs.writeJson(historyFile, history);
+}
+
+async function removeFromHistory(id: string) {
+  const history = await getHistory();
+  const filtered = history.filter((t: any) => t.id !== id);
+  await fs.writeJson(historyFile, filtered);
+}
+
+async function clearHistory() {
+  await fs.writeJson(historyFile, []);
+}
 
 // Cleanup old temporary files (older than 1 hour) every 30 minutes
 setInterval(async () => {
@@ -59,15 +93,43 @@ async function startServer() {
 
   const PORT = 3000;
 
-  // Track active tasks for cancellation
+  // Track active tasks for cancellation and recovery
   const activeTasks = new Map<string, { 
     abortController: AbortController; 
     ffmpegCommand?: ffmpeg.FfmpegCommand;
     isCancelled: boolean;
+    metadata: {
+      url: string;
+      filename: string;
+      progress: number;
+      message: string;
+      timemark: string;
+      logs: any[];
+    }
   }>();
 
   app.use(express.json());
   app.use('/downloads', express.static(downloadsDir));
+
+  // API to get all tasks (history + active)
+  app.get('/api/tasks', async (req, res) => {
+    const history = await getHistory();
+    // Merge with current active state if needed (though history should be up to date)
+    res.json({ tasks: history });
+  });
+
+  // API to clear all history
+  app.post('/api/clear-history', async (req, res) => {
+    await clearHistory();
+    res.json({ success: true });
+  });
+
+  // API to delete single history item
+  app.post('/api/delete-task', async (req, res) => {
+    const { id } = req.body;
+    await removeFromHistory(id);
+    res.json({ success: true });
+  });
 
   // API to cancel download
   app.post('/api/cancel', async (req, res) => {
@@ -116,13 +178,37 @@ async function startServer() {
 
     // Initialize task tracking
     const abortController = new AbortController();
-    activeTasks.set(downloadId, { abortController, isCancelled: false });
+    const metadata = {
+      url,
+      filename: safeFilename,
+      progress: 0,
+      message: '正在解析 M3U8 列表...',
+      timemark: '00:00:00',
+      logs: [] as any[]
+    };
+    
+    activeTasks.set(downloadId, { abortController, isCancelled: false, metadata });
+    await saveToHistory({ id: downloadId, ...metadata, status: 'downloading' });
+
+    const sendLog = async (message: string, type: 'info' | 'success' | 'warning' | 'error' = 'info') => {
+      const log = {
+        timestamp: new Date().toLocaleTimeString(),
+        message,
+        type
+      };
+      metadata.logs.push(log);
+      io.emit(`download-log-${downloadId}`, log);
+      // Throttle history saves for logs if necessary, but for now simple update
+      await saveToHistory({ id: downloadId, ...metadata, status: 'downloading' });
+    };
 
     res.json({ downloadId, filename: safeFilename });
 
     try {
       await fs.ensureDir(taskTempDir);
+      sendLog(`任务启动: ${safeFilename}`);
       io.emit(`download-start-${downloadId}`, { message: '正在解析 M3U8 列表...' });
+      sendLog('正在解析 M3U8 列表...');
 
       // 1. Fetch and parse M3U8
       const axiosHeaders: Record<string, string> = {
@@ -172,6 +258,8 @@ async function startServer() {
       const lines = m3u8Content.split('\n');
       const segments: string[] = [];
 
+      sendLog(`解析成功，共发现 ${lines.length} 行内容`);
+
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
         if (line && !line.startsWith('#')) {
@@ -186,8 +274,11 @@ async function startServer() {
       }
 
       if (segments.length === 0) {
+        sendLog('未在 M3U8 中找到视频分片', 'error');
         throw new Error('未在 M3U8 中找到视频分片');
       }
+
+      sendLog(`准备下载 ${segments.length} 个视频分片...`);
 
       io.emit(`download-start-${downloadId}`, { message: `找到 ${segments.length} 个分片，开始下载...` });
 
@@ -242,15 +333,22 @@ async function startServer() {
         }));
 
         const progress = Math.round(((i + batch.length) / segments.length) * 80); // 80% for downloading
+        metadata.progress = progress;
+        metadata.message = `正在下载分片: ${i + batch.length}/${segments.length}`;
+        sendLog(`已下载: ${i + batch.length}/${segments.length} (${progress}%)`);
         io.emit(`download-progress-${downloadId}`, { 
           percent: progress,
-          message: `正在下载分片: ${i + batch.length}/${segments.length}`
+          message: metadata.message
         });
+        await saveToHistory({ id: downloadId, ...metadata, status: 'downloading' });
       }
 
       if (activeTasks.get(downloadId)?.isCancelled) return;
 
       // 3. Merge segments using binary concatenation (more robust for TS segments)
+      sendLog('正在合并分片文件...', 'info');
+      metadata.progress = 85;
+      metadata.message = '正在合并分片...';
       io.emit(`download-progress-${downloadId}`, { percent: 85, message: '正在合并分片...' });
       
       const mergedTsPath = path.join(taskTempDir, 'merged.ts');
@@ -289,6 +387,7 @@ async function startServer() {
       }
 
       command.input(mergedTsPath);
+      sendLog('正在启动 FFmpeg 进行视频转码/封装...', 'info');
 
       // Optimization: Use all available CPU cores
       command.outputOptions('-threads 0');
@@ -332,34 +431,69 @@ async function startServer() {
 
       command
         .on('start', (commandLine) => {
+          sendLog(`FFmpeg 命令已启动`);
           console.log('Spawned Ffmpeg for merging: ' + commandLine);
         })
         .on('progress', (progress) => {
           // FFmpeg progress during merge is usually very fast
           const mergeProgress = 85 + Math.round((progress.percent || 0) * 0.15);
+          const percent = Math.min(99, mergeProgress);
+          metadata.progress = percent;
+          metadata.timemark = progress.timemark || metadata.timemark;
+          metadata.message = '正在合并视频流...';
+          
+          sendLog(`转码进度: ${Math.round(progress.percent || 0)}% (时间点: ${progress.timemark})`);
           io.emit(`download-progress-${downloadId}`, { 
-            percent: Math.min(99, mergeProgress),
-            message: '正在合并视频流...'
+            percent,
+            message: metadata.message,
+            timemark: metadata.timemark
           });
         })
-        .on('error', (err, stdout, stderr) => {
+        .on('error', async (err, stdout, stderr) => {
           if (activeTasks.get(downloadId)?.isCancelled) {
+            sendLog('任务已取消', 'warning');
+            await saveToHistory({ id: downloadId, ...metadata, status: 'cancelled' });
             console.log(`Ffmpeg process for ${downloadId} was killed (cancelled)`);
             return;
           }
           console.error('Merge error:', err.message);
-          if (stderr) console.error('FFmpeg stderr:', stderr);
+          if (stderr) {
+            console.error('FFmpeg stderr:', stderr);
+            sendLog(`FFmpeg 错误: ${stderr.split('\n').pop()}`, 'error');
+          }
           const errorMsg = stderr ? stderr.split('\n').filter(l => l.trim()).pop() : err.message;
+          sendLog(`合并失败: ${errorMsg}`, 'error');
           io.emit(`download-error-${downloadId}`, { error: `合并失败: ${errorMsg}` });
+          
+          metadata.progress = 0;
+          await saveToHistory({ 
+            id: downloadId, 
+            ...metadata, 
+            status: 'error', 
+            error: `合并失败: ${errorMsg}`,
+            completedAt: new Date().toLocaleString('zh-CN')
+          });
+
           fs.remove(taskTempDir).catch(console.error);
           activeTasks.delete(downloadId);
         })
         .on('end', async () => {
           console.log('Merge finished!');
+          const downloadUrl = `/downloads/${safeFilename}`;
           io.emit(`download-complete-${downloadId}`, { 
-            url: `/downloads/${safeFilename}`,
+            url: downloadUrl,
             filename: safeFilename 
           });
+
+          await saveToHistory({ 
+            id: downloadId, 
+            ...metadata, 
+            status: 'completed', 
+            progress: 100,
+            downloadUrl,
+            completedAt: new Date().toLocaleString('zh-CN')
+          });
+
           // Cleanup temp files
           await fs.remove(taskTempDir).catch(console.error);
           activeTasks.delete(downloadId);

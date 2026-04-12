@@ -3,6 +3,12 @@ import { Download, Link as LinkIcon, FileVideo, CheckCircle2, AlertCircle, Loade
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
 
+interface DownloadLog {
+  timestamp: string;
+  message: string;
+  type: 'info' | 'success' | 'warning' | 'error';
+}
+
 interface DownloadState {
   id: string;
   url: string;
@@ -14,6 +20,7 @@ interface DownloadState {
   error?: string;
   downloadUrl?: string;
   completedAt?: string;
+  logs?: DownloadLog[];
 }
 
 type TabType = 'downloading' | 'completed' | 'settings';
@@ -31,36 +38,101 @@ export default function App() {
   const [videoPreset, setVideoPreset] = useState('fast');
   const [videoBitrate, setVideoBitrate] = useState('');
   const [audioBitrate, setAudioBitrate] = useState('');
-  const [downloads, setDownloads] = useState<DownloadState[]>(() => {
-    const saved = localStorage.getItem('m3u8_download_history');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved) as DownloadState[];
-        return parsed.map(d => d.status === 'downloading' ? { ...d, status: 'error', error: '页面刷新，任务中断' } : d);
-      } catch (e) {
-        console.error('Failed to parse history:', e);
-        return [];
-      }
-    }
-    return [];
-  });
+  const [downloads, setDownloads] = useState<DownloadState[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-    localStorage.setItem('m3u8_download_history', JSON.stringify(downloads));
-  }, [downloads]);
-
-  useEffect(() => {
     socketRef.current = io();
+    
+    // Fetch history from server on mount
+    const fetchHistory = async () => {
+      try {
+        const response = await fetch('/api/tasks');
+        const data = await response.json();
+        
+        if (data.tasks) {
+          setDownloads(data.tasks);
+          data.tasks.forEach((task: any) => {
+            if (task.status === 'downloading') {
+              attachTaskListeners(task.id);
+            }
+          });
+        }
+      } catch (err) {
+        console.error('Failed to fetch history:', err);
+      }
+    };
+
+    fetchHistory();
+
     return () => {
       socketRef.current?.disconnect();
     };
   }, []);
 
+  const attachTaskListeners = (dId: string) => {
+    const socket = socketRef.current;
+    if (!socket) return;
+
+    // Remove existing listeners to avoid duplicates
+    socket.off(`download-start-${dId}`);
+    socket.off(`download-progress-${dId}`);
+    socket.off(`download-complete-${dId}`);
+    socket.off(`download-log-${dId}`);
+    socket.off(`download-error-${dId}`);
+
+    socket.on(`download-start-${dId}`, (update) => {
+      setDownloads(prev => prev.map(d => 
+        d.id === dId ? { ...d, message: update.message } : d
+      ));
+    });
+
+    socket.on(`download-progress-${dId}`, (update) => {
+      setDownloads(prev => prev.map(d => 
+        d.id === dId ? { 
+          ...d, 
+          progress: update.percent || 0, 
+          timemark: update.timemark || d.timemark,
+          message: update.message || d.message
+        } : d
+      ));
+    });
+
+    socket.on(`download-complete-${dId}`, (update) => {
+      setDownloads(prev => prev.map(d => 
+        d.id === dId ? { 
+          ...d, 
+          status: 'completed', 
+          downloadUrl: update.url, 
+          progress: 100,
+          completedAt: new Date().toLocaleString('zh-CN')
+        } : d
+      ));
+    });
+
+    socket.on(`download-log-${dId}`, (log) => {
+      setDownloads(prev => prev.map(d => 
+        d.id === dId ? { ...d, logs: [...(d.logs || []), log] } : d
+      ));
+    });
+
+    socket.on(`download-error-${dId}`, (update) => {
+      setDownloads(prev => prev.map(d => 
+        d.id === dId ? { 
+          ...d, 
+          status: 'error', 
+          error: update.error,
+          completedAt: new Date().toLocaleString('zh-CN')
+        } : d
+      ));
+    });
+  };
+
   const [showCopyToast, setShowCopyToast] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [viewingLogId, setViewingLogId] = useState<string | null>(null);
 
   const clearCompleted = () => {
     setDownloads(prev => prev.filter(d => d.status !== 'completed' && d.status !== 'error'));
@@ -79,7 +151,14 @@ export default function App() {
         console.error(`Failed to cancel task ${task.id}:`, err);
       }
     }
-    setDownloads([]);
+    
+    try {
+      await fetch('/api/clear-history', { method: 'POST' });
+      setDownloads([]);
+    } catch (err) {
+      console.error('Failed to clear history:', err);
+    }
+    
     setShowClearConfirm(false);
   };
 
@@ -96,7 +175,17 @@ export default function App() {
         console.error('Failed to cancel task:', err);
       }
     }
-    setDownloads(prev => prev.filter(d => d.id !== id));
+    
+    try {
+      await fetch('/api/delete-task', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      setDownloads(prev => prev.filter(d => d.id !== id));
+    } catch (err) {
+      console.error('Failed to delete task:', err);
+    }
   };
 
   const copyToClipboard = (text: string) => {
@@ -165,51 +254,7 @@ export default function App() {
         };
 
         setDownloads(prev => [newDownload, ...prev]);
-
-        const socket = socketRef.current;
-        if (socket) {
-          const dId = data.downloadId;
-          
-          socket.on(`download-start-${dId}`, (update) => {
-            setDownloads(prev => prev.map(d => 
-              d.id === dId ? { ...d, message: update.message } : d
-            ));
-          });
-
-          socket.on(`download-progress-${dId}`, (update) => {
-            setDownloads(prev => prev.map(d => 
-              d.id === dId ? { 
-                ...d, 
-                progress: update.percent || 0, 
-                timemark: update.timemark || d.timemark,
-                message: update.message || d.message
-              } : d
-            ));
-          });
-
-          socket.on(`download-complete-${dId}`, (update) => {
-            setDownloads(prev => prev.map(d => 
-              d.id === dId ? { 
-                ...d, 
-                status: 'completed', 
-                downloadUrl: update.url, 
-                progress: 100,
-                completedAt: new Date().toLocaleString('zh-CN')
-              } : d
-            ));
-          });
-
-          socket.on(`download-error-${dId}`, (update) => {
-            setDownloads(prev => prev.map(d => 
-              d.id === dId ? { 
-                ...d, 
-                status: 'error', 
-                error: update.error,
-                completedAt: new Date().toLocaleString('zh-CN')
-              } : d
-            ));
-          });
-        }
+        attachTaskListeners(data.downloadId);
       } catch (err) {
         console.error('下载启动失败:', err);
       }
@@ -447,6 +492,13 @@ export default function App() {
                           </div>
 
                           <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button 
+                              onClick={() => setViewingLogId(download.id)}
+                              className="p-2 text-slate-400 hover:text-brand-400 transition-colors"
+                              title="查看日志"
+                            >
+                              <List size={16} />
+                            </button>
                             {download.status === 'completed' && (
                               <a 
                                 href={download.downloadUrl} 
@@ -753,6 +805,69 @@ export default function App() {
                 >
                   确认清除
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Log Viewer Modal */}
+      <AnimatePresence>
+        {viewingLogId && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setViewingLogId(null)}
+              className="absolute inset-0 bg-dark-bg/80 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-2xl bg-dark-sidebar border border-dark-border rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+            >
+              <div className="p-6 border-b border-dark-border flex items-center justify-between bg-dark-sidebar/50">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-brand-500/10 rounded-xl flex items-center justify-center">
+                    <List size={20} className="text-brand-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-bold">任务日志</h3>
+                    <p className="text-xs text-slate-500 truncate max-w-[300px]">
+                      {downloads.find(d => d.id === viewingLogId)?.filename}
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setViewingLogId(null)}
+                  className="p-2 hover:bg-white/5 rounded-lg transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              
+              <div className="flex-1 overflow-y-auto p-6 space-y-2 bg-black/20 font-mono text-[11px] custom-scrollbar">
+                {downloads.find(d => d.id === viewingLogId)?.logs?.length ? (
+                  downloads.find(d => d.id === viewingLogId)?.logs?.map((log, i) => (
+                    <div key={i} className="flex gap-3 animate-in fade-in slide-in-from-left-2 duration-300">
+                      <span className="text-slate-600 shrink-0">[{log.timestamp}]</span>
+                      <span className={`
+                        ${log.type === 'error' ? 'text-rose-400' : 
+                          log.type === 'success' ? 'text-emerald-400' : 
+                          log.type === 'warning' ? 'text-amber-400' : 
+                          'text-slate-300'}
+                      `}>
+                        {log.message}
+                      </span>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-center py-20 text-slate-600 italic">
+                    暂无日志记录
+                  </div>
+                )}
               </div>
             </motion.div>
           </div>
