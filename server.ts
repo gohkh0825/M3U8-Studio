@@ -28,22 +28,11 @@ const tempDir = path.join(__dirname, 'temp');
 fs.ensureDirSync(downloadsDir);
 fs.ensureDirSync(tempDir);
 
-// Cleanup old files (older than 1 hour) every 30 minutes
+// Cleanup old temporary files (older than 1 hour) every 30 minutes
 setInterval(async () => {
   try {
-    // Cleanup downloads
-    const downloadFiles = await fs.readdir(downloadsDir);
     const now = Date.now();
-    for (const file of downloadFiles) {
-      const filePath = path.join(downloadsDir, file);
-      const stats = await fs.stat(filePath);
-      if (now - stats.mtimeMs > 3600000) { // 1 hour
-        await fs.remove(filePath);
-        console.log(`Removed old download file: ${file}`);
-      }
-    }
-
-    // Cleanup temp tasks
+    // Cleanup temp tasks (temporary .ts segments)
     const tempTasks = await fs.readdir(tempDir);
     for (const task of tempTasks) {
       const taskPath = path.join(tempDir, task);
