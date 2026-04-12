@@ -156,22 +156,31 @@ async function startServer() {
       
       if (activeTasks.get(downloadId)?.isCancelled) return;
 
+      // Get the final URL after redirects to correctly resolve relative segment paths
+      const finalUrl = response.request?.res?.responseUrl || url;
+      
+      // Update Referer and Origin headers based on the final URL for segment requests
+      try {
+        const finalUrlObj = new URL(finalUrl);
+        axiosHeaders['Referer'] = finalUrlObj.origin + '/';
+        axiosHeaders['Origin'] = finalUrlObj.origin;
+      } catch (e) {
+        // Fallback to original headers if finalUrl is somehow invalid
+      }
+
       const m3u8Content = response.data;
       const lines = m3u8Content.split('\n');
       const segments: string[] = [];
-      const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
         if (line && !line.startsWith('#')) {
-          // Resolve segment URL
-          if (line.startsWith('http')) {
-            segments.push(line);
-          } else if (line.startsWith('/')) {
-            const urlObj = new URL(url);
-            segments.push(`${urlObj.origin}${line}`);
-          } else {
-            segments.push(`${baseUrl}${line}`);
+          try {
+            // Use URL constructor for robust relative path resolution
+            const resolvedUrl = new URL(line, finalUrl).toString();
+            segments.push(resolvedUrl);
+          } catch (e) {
+            console.error(`Failed to resolve segment URL: ${line} with base ${finalUrl}`);
           }
         }
       }
