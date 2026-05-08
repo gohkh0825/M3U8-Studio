@@ -29,6 +29,7 @@ interface DownloadState {
     videoBitrate?: string;
     audioBitrate?: string;
   };
+  retryCount?: number;
 }
 
 type TabType = 'downloading' | 'completed' | 'settings';
@@ -727,8 +728,9 @@ export default function App() {
                         onChange={(e) => setVideoCodec(e.target.value)}
                       >
                         <option value="copy">流复制 (极速)</option>
-                        <option value="libx264">H.264</option>
-                        <option value="libx265">H.265</option>
+                        <option value="libx264">H.264 (CPU)</option>
+                        <option value="libx265">H.265 (CPU)</option>
+                        <option value="h264_amf">H.264 (AMD GPU)</option>
                       </select>
                     </div>
                   </div>

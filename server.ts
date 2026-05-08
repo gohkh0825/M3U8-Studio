@@ -62,7 +62,7 @@ async function clearHistory() {
   await fs.writeJson(historyFile, []);
 }
 
-// Cleanup old temporary files (older than 1 hour) every 30 minutes
+// Cleanup old temporary files (older than 24 hours) every hour
 setInterval(async () => {
   try {
     const now = Date.now();
@@ -71,7 +71,7 @@ setInterval(async () => {
     for (const task of tempTasks) {
       const taskPath = path.join(tempDir, task);
       const stats = await fs.stat(taskPath);
-      if (now - stats.mtimeMs > 3600000) { // 1 hour
+      if (now - stats.mtimeMs > 86400000) { // 24 hours
         await fs.remove(taskPath);
         console.log(`Removed old temp task: ${task}`);
       }
@@ -79,7 +79,7 @@ setInterval(async () => {
   } catch (err) {
     console.error('Cleanup error:', err);
   }
-}, 1800000);
+}, 3600000);
 
 async function startServer() {
   const app = express();
@@ -129,6 +129,9 @@ async function startServer() {
   app.post('/api/delete-task', async (req, res) => {
     const { id } = req.body;
     await removeFromHistory(id);
+    // Explicitly cleanup temp files when user deletes history
+    const taskTempDir = path.join(tempDir, id);
+    await fs.remove(taskTempDir).catch(console.error);
     res.json({ success: true });
   });
 
@@ -177,21 +180,45 @@ async function startServer() {
     const downloadId = existingId || timestamp.toString();
     const taskTempDir = path.join(tempDir, downloadId);
     
-    // Cleanup temp dir if it exists (for retries)
-    await fs.remove(taskTempDir).catch(console.error);
+    // For new downloads, ensure temp dir is clean. For retries, keep existing segments.
+    if (!existingId) {
+      await fs.remove(taskTempDir).catch(console.error);
+    }
     await fs.ensureDir(taskTempDir);
 
-    // Initialize task tracking
+    // Initialize/Restore task tracking
     const abortController = new AbortController();
-    const metadata = {
-      url,
-      filename: safeFilename,
-      progress: 0,
-      message: '正在解析 M3U8 列表...',
-      timemark: '00:00:00',
-      logs: [] as any[],
-      options: { headers, format, videoBitrate, audioBitrate, videoCodec, videoPreset }
-    };
+    let metadata: any;
+    
+    if (existingId) {
+      const history = await getHistory();
+      const existingTask = history.find((t: any) => t.id === existingId);
+      if (existingTask) {
+        metadata = {
+          ...existingTask,
+          status: 'downloading',
+          message: '正在重新启动下载...',
+          progress: existingTask.progress || 0,
+          logs: [...(existingTask.logs || []), {
+            timestamp: new Date().toLocaleTimeString(),
+            message: '--- 重新启动下载任务 ---',
+            type: 'warning'
+          }]
+        };
+      }
+    }
+
+    if (!metadata) {
+      metadata = {
+        url,
+        filename: safeFilename,
+        progress: 0,
+        message: '正在解析 M3U8 列表...',
+        timemark: '00:00:00',
+        logs: [] as any[],
+        options: { headers, format, videoBitrate, audioBitrate, videoCodec, videoPreset }
+      };
+    }
     
     activeTasks.set(downloadId, { abortController, isCancelled: false, metadata });
     await saveToHistory({ id: downloadId, ...metadata, status: 'downloading' });
@@ -301,6 +328,15 @@ async function startServer() {
           const segmentPath = path.join(taskTempDir, `segment_${segmentIndex.toString().padStart(5, '0')}.ts`);
           
           try {
+            // Skill check: If file already exists and has content, skip download
+            if (await fs.pathExists(segmentPath)) {
+              const stats = await fs.stat(segmentPath);
+              if (stats.size > 0) {
+                segmentFiles[segmentIndex] = segmentPath;
+                return;
+              }
+            }
+
             const segResponse = await axios.get(segmentUrl, { 
               headers: axiosHeaders,
               responseType: 'arraybuffer',
@@ -406,9 +442,13 @@ async function startServer() {
         // Ensure compatibility with most players
         command.outputOptions('-pix_fmt yuv420p');
         
-        // Optimization: Set a default preset for x264/x265 for better speed/quality balance
+        // Optimization: Handle different codecs including GPU acceleration
         if (videoCodec === 'libx264' || videoCodec === 'libx265') {
           command.outputOptions(`-preset ${videoPreset}`);
+        } else if (videoCodec === 'h264_amf') {
+          // AMD GPU acceleration. AMF doesn't use -preset like x264.
+          // We can use -quality for speed/quality tradeoff if wanted
+          command.outputOptions('-quality speed'); // default to fast
         }
 
         if (videoBitrate) {
@@ -481,7 +521,8 @@ async function startServer() {
             completedAt: new Date().toLocaleString('zh-CN')
           });
 
-          fs.remove(taskTempDir).catch(console.error);
+          // Rely on background cleanup instead of immediate deletion to allow retries
+          // fs.remove(taskTempDir).catch(console.error);
           activeTasks.delete(downloadId);
         })
         .on('end', async () => {
@@ -501,8 +542,8 @@ async function startServer() {
             completedAt: new Date().toLocaleString('zh-CN')
           });
 
-          // Cleanup temp files
-          await fs.remove(taskTempDir).catch(console.error);
+          // Rely on background cleanup
+          // await fs.remove(taskTempDir).catch(console.error);
           activeTasks.delete(downloadId);
         })
         .save(outputPath);
@@ -514,7 +555,8 @@ async function startServer() {
       }
       console.error('Download task failed:', err);
       io.emit(`download-error-${downloadId}`, { error: err.message });
-      await fs.remove(taskTempDir).catch(console.error);
+      // Keep files for retry
+      // await fs.remove(taskTempDir).catch(console.error);
       activeTasks.delete(downloadId);
     }
   });
