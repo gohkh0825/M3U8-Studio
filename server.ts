@@ -459,8 +459,8 @@ async function startServer() {
           command.outputOptions(`-preset ${videoPreset}`);
         } else if (videoCodec === 'h264_vaapi') {
           // Linux VAAPI hardware acceleration (Intel/AMD on Linux)
+          command.videoCodec('h264_vaapi');
           // With -hwaccel_output_format vaapi, frames stay in GPU memory
-          // We can add specific VAAPI options if needed, but the basic command uses h264_vaapi
         }
 
         if (videoBitrate) {

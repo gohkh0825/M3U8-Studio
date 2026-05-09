@@ -1,8 +1,16 @@
 # Use Node.js LTS as base image
 FROM node:20-slim
 
-# Install FFmpeg
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# Install FFmpeg and VAAPI drivers for hardware acceleration
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libva-drm2 \
+    libva2 \
+    i965-va-driver \
+    intel-media-va-driver-non-free \
+    mesa-va-drivers \
+    va-driver-all \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app

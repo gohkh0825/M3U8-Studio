@@ -2,7 +2,12 @@ services:
   downloader:
     build: .
     ports:
-      - "3000:3000"
+      - "9199:3000"
     volumes:
-      - ./downloads:/app/downloads
+      - ./vol1/1000/m3u8/downloads:/app/downloads
+      - ./vol1/1000/m3u8/downloads/temp:/app/temp
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
     restart: always
