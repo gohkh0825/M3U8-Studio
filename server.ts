@@ -433,9 +433,14 @@ async function startServer() {
       }
 
       if (videoCodec === 'h264_vaapi') {
-        command.inputOptions('-vaapi_device /dev/dri/renderD128');
+        command.inputOptions([
+          '-hwaccel vaapi',
+          '-hwaccel_device /dev/dri/renderD128',
+          '-hwaccel_output_format vaapi'
+        ]);
       }
       command.input(mergedTsPath);
+      
       sendLog('正在启动 FFmpeg 进行视频转码/封装...', 'info');
 
       // Optimization: Use all available CPU cores
@@ -454,7 +459,8 @@ async function startServer() {
           command.outputOptions(`-preset ${videoPreset}`);
         } else if (videoCodec === 'h264_vaapi') {
           // Linux VAAPI hardware acceleration (Intel/AMD on Linux)
-          command.outputOptions('-vf format=nv12,hwupload');
+          // With -hwaccel_output_format vaapi, frames stay in GPU memory
+          // We can add specific VAAPI options if needed, but the basic command uses h264_vaapi
         }
 
         if (videoBitrate) {
@@ -512,7 +518,18 @@ async function startServer() {
 
           // Fallback logic for unsupported codecs (e.g. h264_amf on non-AMD systems)
           const stderrStr = stderr || '';
-          if (stderrStr.includes('Unknown encoder') || stderrStr.includes('Codec not found') || stderrStr.includes('Error while opening encoder') || stderrStr.includes('Unrecognized option') || err.message.includes('Unknown encoder') || stderrStr.includes('Failed to set value')) {
+          if (
+            stderrStr.includes('Unknown encoder') || 
+            stderrStr.includes('Codec not found') || 
+            stderrStr.includes('Error while opening encoder') || 
+            stderrStr.includes('Unrecognized option') || 
+            err.message.includes('Unknown encoder') || 
+            stderrStr.includes('Failed to set value') ||
+            stderrStr.includes('vaapi') ||
+            stderrStr.includes('VAAPI') ||
+            stderrStr.includes('device') ||
+            stderrStr.includes('hwupload')
+          ) {
             if (videoCodec !== 'libx264') {
               console.log(`Codec ${videoCodec} failed, falling back to libx264`);
               sendLog(`检测到硬件编码器 ${videoCodec} 不可用或硬件访问受限，正在回退到 libx264 (CPU)...`, 'warning');
@@ -605,6 +622,7 @@ async function startServer() {
             id: downloadId, 
             ...metadata, 
             status: 'completed', 
+            stage: 'completed',
             progress: 100,
             downloadUrl,
             completedAt: new Date().toLocaleString('zh-CN')
