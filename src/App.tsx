@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Download, Link as LinkIcon, FileVideo, CheckCircle2, AlertCircle, Loader2, Settings2, Trash2, Layers, Zap, ShieldCheck, ExternalLink, ArrowRight, Copy, X, List, CheckSquare, Plus, HelpCircle, ChevronLeft, ChevronRight, Search, RotateCcw } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
@@ -51,6 +51,7 @@ export default function App() {
   const [downloads, setDownloads] = useState<DownloadState[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
@@ -153,6 +154,59 @@ export default function App() {
     });
   };
 
+  const toggleSelectTask = (id: string) => {
+    setSelectedIds(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(id)) {
+        newSet.delete(id);
+      } else {
+        newSet.add(id);
+      }
+      return newSet;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (isAllSelected) {
+      setSelectedIds(prev => {
+        const newSet = new Set(prev);
+        visibleIds.forEach(id => newSet.delete(id));
+        return newSet;
+      });
+    } else {
+      setSelectedIds(prev => {
+        const newSet = new Set(prev);
+        visibleIds.forEach(id => newSet.add(id));
+        return newSet;
+      });
+    }
+  };
+
+  const batchDelete = async () => {
+    if (selectedIds.size === 0) return;
+    
+    const idsToDelete = Array.from(selectedIds) as string[];
+    setSelectedIds(new Set()); // Optimistic selection clear
+
+    await Promise.all(idsToDelete.map(id => removeTask(id)));
+  };
+
+  const batchCancel = async () => {
+    if (selectedIds.size === 0) return;
+    
+    const idsToCancel = Array.from(selectedIds) as string[];
+    const tasksToCancel = downloads.filter(d => idsToCancel.includes(d.id) && d.status === 'downloading');
+    
+    setSelectedIds(new Set());
+    await Promise.all(tasksToCancel.map(task => 
+      fetch('/api/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ downloadId: task.id }),
+      }).catch(err => console.error(`Failed to cancel task ${task.id}:`, err))
+    ));
+  };
+
   const [showCopyToast, setShowCopyToast] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [viewingLogId, setViewingLogId] = useState<string | null>(null);
@@ -163,21 +217,19 @@ export default function App() {
 
   const clearAll = async () => {
     const activeDownloads = downloads.filter(d => d.status === 'downloading');
-    for (const task of activeDownloads) {
-      try {
-        await fetch('/api/cancel', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ downloadId: task.id }),
-        });
-      } catch (err) {
-        console.error(`Failed to cancel task ${task.id}:`, err);
-      }
-    }
+    
+    await Promise.all(activeDownloads.map(task => 
+      fetch('/api/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ downloadId: task.id }),
+      }).catch(err => console.error(`Failed to cancel task ${task.id}:`, err))
+    ));
     
     try {
       await fetch('/api/clear-history', { method: 'POST' });
       setDownloads([]);
+      setSelectedIds(new Set());
     } catch (err) {
       console.error('Failed to clear history:', err);
     }
@@ -344,11 +396,18 @@ export default function App() {
     setShowNewDownloadModal(false);
   };
 
-  const filteredDownloads = downloads.filter(d => {
-    if (activeTab === 'downloading') return d.status === 'downloading' || d.status === 'idle' || d.status === 'error' || d.status === 'cancelled';
-    if (activeTab === 'completed') return d.status === 'completed';
-    return true;
-  });
+  const filteredDownloads = useMemo(() => {
+    return downloads.filter(d => {
+      if (activeTab === 'downloading') return d.status === 'downloading' || d.status === 'idle' || d.status === 'error' || d.status === 'cancelled';
+      if (activeTab === 'completed') return d.status === 'completed';
+      return true;
+    });
+  }, [downloads, activeTab]);
+
+  const visibleIds = useMemo(() => filteredDownloads.map(d => d.id), [filteredDownloads]);
+  const selectedCount = useMemo(() => visibleIds.filter(id => selectedIds.has(id)).length, [visibleIds, selectedIds]);
+  const isAllSelected = visibleIds.length > 0 && selectedCount === visibleIds.length;
+  const isIndeterminate = selectedCount > 0 && selectedCount < visibleIds.length;
 
   return (
     <div className="flex h-screen bg-dark-bg text-slate-200 font-sans overflow-hidden">
@@ -487,20 +546,35 @@ export default function App() {
               {/* List Header Actions */}
               <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-4">
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <div className="w-4 h-4 border-2 border-slate-600 rounded group-hover:border-brand-500 transition-colors" />
+                  <label 
+                    className="flex items-center gap-2 cursor-pointer group"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      toggleSelectAll();
+                    }}
+                  >
+                    <div className={`w-4 h-4 border-2 rounded transition-all flex items-center justify-center ${
+                      isAllSelected ? 'bg-brand-500 border-brand-500' : 
+                      isIndeterminate ? 'border-brand-500' : 'border-slate-600 group-hover:border-brand-500'
+                    }`}>
+                      {isAllSelected && <div className="w-1.5 h-1.5 bg-white rounded-sm" />}
+                      {isIndeterminate && <div className="w-2 h-0.5 bg-brand-500" />}
+                    </div>
                     <span className="text-xs font-bold text-slate-400 group-hover:text-slate-200 transition-colors">全选</span>
                   </label>
                 </div>
                 <div className="flex items-center gap-2">
                   <button 
-                    onClick={clearCompleted}
-                    className="px-3 py-1.5 text-[11px] font-bold text-slate-400 hover:text-slate-200 bg-white/5 hover:bg-white/10 rounded-lg border border-white/5 transition-all"
+                    onClick={batchDelete}
+                    disabled={selectedIds.size === 0}
+                    className="px-3 py-1.5 text-[11px] font-bold text-slate-400 hover:text-rose-400 bg-white/5 hover:bg-rose-500/10 rounded-lg border border-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                   >
                     删除
                   </button>
                   <button 
-                    className="px-3 py-1.5 text-[11px] font-bold text-slate-400 hover:text-slate-200 bg-white/5 hover:bg-white/10 rounded-lg border border-white/5 transition-all"
+                    onClick={batchCancel}
+                    disabled={selectedIds.size === 0}
+                    className="px-3 py-1.5 text-[11px] font-bold text-slate-400 hover:text-amber-400 bg-white/5 hover:bg-amber-500/10 rounded-lg border border-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
                   >
                     取消
                   </button>
@@ -529,10 +603,19 @@ export default function App() {
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.95 }}
-                        className="group bg-dark-card border border-dark-border hover:border-brand-500/50 rounded-xl p-4 transition-all"
+                        className={`group bg-dark-card border rounded-xl p-4 transition-all ${
+                          selectedIds.has(download.id) ? 'border-brand-500 bg-brand-500/5' : 'border-dark-border hover:border-brand-500/50'
+                        }`}
                       >
                         <div className="flex items-center gap-4">
-                          <div className="w-4 h-4 border-2 border-slate-700 rounded shrink-0" />
+                          <button 
+                            onClick={() => toggleSelectTask(download.id)}
+                            className={`w-4 h-4 border-2 rounded shrink-0 transition-all flex items-center justify-center ${
+                              selectedIds.has(download.id) ? 'bg-brand-500 border-brand-500' : 'border-slate-700 hover:border-brand-500'
+                            }`}
+                          >
+                            {selectedIds.has(download.id) && <div className="w-1.5 h-1.5 bg-white rounded-sm" />}
+                          </button>
                           
                           <div className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center shrink-0">
                             {download.status === 'completed' ? <CheckCircle2 size={20} className="text-emerald-500" /> :

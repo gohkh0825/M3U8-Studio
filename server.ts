@@ -390,54 +390,46 @@ async function startServer() {
 
       if (activeTasks.get(downloadId)?.isCancelled) return;
 
-      // 3. Merge segments using binary concatenation
-      sendLog('正在快速合并分片文件...', 'info');
-      metadata.progress = 0; // Reset for merge stage
+      // 3. Prepare FFmpeg concat list
+      sendLog('正在配置 FFmpeg 分片合并...', 'info');
+      metadata.progress = 0;
       metadata.stage = 'merging';
-      metadata.message = '正在合并分片...';
-      io.emit(`download-progress-${downloadId}`, { percent: 0, message: '正在合并分片...', stage: 'merging' });
+      metadata.message = '配置合并阶段...';
+      io.emit(`download-progress-${downloadId}`, { percent: 0, message: '配置合并阶段...', stage: 'merging' });
       
-      const mergedTsPath = path.join(taskTempDir, 'merged.ts');
-      const writeStream = fs.createWriteStream(mergedTsPath);
+      const concatListPath = path.join(taskTempDir, 'concat_list.txt');
+      let concatListContent = '';
       
-      try {
-        for (let i = 0; i < segments.length; i++) {
-          const segmentPath = path.join(taskTempDir, `segment_${i.toString().padStart(5, '0')}.ts`);
-          if (!(await fs.pathExists(segmentPath))) {
-            throw new Error(`分片 ${i} 丢失，无法合并`);
-          }
-          
-          await new Promise((resolve, reject) => {
-            const readStream = fs.createReadStream(segmentPath);
-            readStream.pipe(writeStream, { end: false });
-            readStream.on('end', resolve);
-            readStream.on('error', reject);
-          });
+      for (let i = 0; i < segments.length; i++) {
+        const segmentFilename = `segment_${i.toString().padStart(5, '0')}.ts`;
+        const segmentPath = path.join(taskTempDir, segmentFilename);
+        if (!(await fs.pathExists(segmentPath))) {
+          throw new Error(`分片 ${i} 丢失，无法合并`);
         }
-        writeStream.end();
-        await new Promise((resolve, reject) => {
-          writeStream.on('finish', resolve);
-          writeStream.on('error', reject);
-        });
-      } catch (mergeErr) {
-        writeStream.destroy();
-        throw mergeErr;
+        // Use relative path for FFmpeg concat file
+        concatListContent += `file '${segmentFilename}'\n`;
       }
+      
+      await fs.writeFile(concatListPath, concatListContent);
 
-      const command = ffmpeg(mergedTsPath);
+      const command = ffmpeg();
+      command.input(concatListPath);
+      
+      const inputOptions = ['-f', 'concat', '-safe', '0'];
+
+      if (videoCodec === 'h264_vaapi') {
+        inputOptions.push('-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi');
+        if (fs.existsSync('/dev/dri/renderD128')) {
+          inputOptions.push('-vaapi_device', '/dev/dri/renderD128');
+        }
+      }
+      
+      command.inputOptions(inputOptions);
       
       // Store command for cancellation
       const taskEntry = activeTasks.get(downloadId);
       if (taskEntry) {
         taskEntry.ffmpegCommand = command;
-      }
-
-      if (videoCodec === 'h264_vaapi') {
-        command.inputOptions([
-          '-hwaccel vaapi',
-          '-hwaccel_device /dev/dri/renderD128',
-          '-hwaccel_output_format vaapi'
-        ]);
       }
       
       sendLog('正在启动 FFmpeg 进行视频转码/封装...', 'info');
@@ -448,15 +440,17 @@ async function startServer() {
       if (videoCodec === 'copy') {
         command.outputOptions('-c copy');
       } else {
-        command.videoCodec(videoCodec);
-        
-        // Ensure compatibility with most players (for CPU encoding)
-        if (videoCodec === 'libx264' || videoCodec === 'libx265') {
-          command.outputOptions('-pix_fmt yuv420p');
-          command.outputOptions(`-preset ${videoPreset}`);
-        } else if (videoCodec === 'h264_vaapi') {
+        // Optimization: Handle different codecs including GPU acceleration
+        if (videoCodec === 'h264_vaapi') {
           // Linux VAAPI hardware acceleration (Intel/AMD on Linux)
           command.videoCodec('h264_vaapi');
+        } else {
+          command.videoCodec(videoCodec);
+          // Ensure compatibility with most players (for CPU encoding)
+          if (videoCodec === 'libx264' || videoCodec === 'libx265') {
+            command.outputOptions('-pix_fmt yuv420p');
+            command.outputOptions(`-preset ${videoPreset}`);
+          }
         }
 
         if (videoBitrate) {
@@ -486,14 +480,14 @@ async function startServer() {
       command
         .on('start', (commandLine) => {
           sendLog(`FFmpeg 命令已启动`);
-          console.log('Spawned Ffmpeg for merging: ' + commandLine);
+          console.log('Spawned Ffmpeg for task: ' + commandLine);
         })
         .on('progress', (progress) => {
           if (activeTasks.get(downloadId)?.isCancelled) return;
           const percent = Math.round(progress.percent || 0);
           metadata.progress = percent;
           metadata.timemark = progress.timemark || metadata.timemark;
-          metadata.message = '正在进行硬件加速/转码...';
+          metadata.message = videoCodec.includes('vaapi') ? '正在使用硬件加速转码...' : '正在进行视频转码/封装...';
           
           sendLog(`转码进度: ${percent}% (时间点: ${progress.timemark})`);
           io.emit(`download-progress-${downloadId}`, { 
@@ -512,76 +506,73 @@ async function startServer() {
             return;
           }
 
-          // Fallback logic for unsupported codecs (e.g. h264_amf on non-AMD systems)
+          // Fallback logic for unsupported codecs or hardware issues
           const stderrStr = stderr || '';
-          if (
+          const isHardwareErrorInfo = 
             stderrStr.includes('Unknown encoder') || 
             stderrStr.includes('Codec not found') || 
             stderrStr.includes('Error while opening encoder') || 
-            stderrStr.includes('Unrecognized option') || 
-            err.message.includes('Unknown encoder') || 
-            stderrStr.includes('Failed to set value') ||
             stderrStr.includes('vaapi') ||
             stderrStr.includes('VAAPI') ||
             stderrStr.includes('device') ||
-            stderrStr.includes('hwupload')
-          ) {
-            if (videoCodec !== 'libx264') {
-              console.log(`Codec ${videoCodec} failed, falling back to libx264`);
-              sendLog(`检测到硬件编码器 ${videoCodec} 不可用或硬件访问受限，正在回退到 libx264 (CPU)...`, 'warning');
-              metadata.logs.push({
-                timestamp: new Date().toLocaleTimeString(),
-                message: `编码器 ${videoCodec} 不可用，回退到 libx264`,
-                type: 'warning'
-              });
+            stderrStr.includes('hwupload') ||
+            err.message.includes('Unknown encoder');
+
+          if (isHardwareErrorInfo && videoCodec !== 'libx264') {
+            console.log(`Codec ${videoCodec} failed or hardware unavailable, falling back to libx264`);
+            sendLog(`检测到硬件编码器 ${videoCodec} 不可用或硬件访问受限，正在回退到 libx264 (CPU)...`, 'warning');
+            
+            // Restart FFmpeg with libx264
+            const retryCommand = ffmpeg();
+            retryCommand.input(concatListPath).inputOptions(['-f', 'concat', '-safe', '0']);
+            const currentTask = activeTasks.get(downloadId);
+            if (currentTask) currentTask.ffmpegCommand = retryCommand;
+            
+            retryCommand
+              .outputOptions('-threads 0')
+              .outputOptions('-pix_fmt yuv420p')
+              .videoCodec('libx264')
+              .outputOptions(`-preset ${videoPreset}`);
               
-              // Restart FFmpeg with libx264
-              const retryCommand = ffmpeg();
-              const currentTask = activeTasks.get(downloadId);
-              if (currentTask) currentTask.ffmpegCommand = retryCommand;
-              
-              retryCommand.input(mergedTsPath)
-                .outputOptions('-threads 0')
-                .outputOptions('-pix_fmt yuv420p');
-              
-              retryCommand.videoCodec('libx264')
-                .outputOptions(`-preset ${videoPreset}`);
-                
-              if (videoBitrate) retryCommand.videoBitrate(videoBitrate);
-              if (audioBitrate) retryCommand.audioBitrate(audioBitrate);
-              
-              retryCommand
-                .on('start', () => sendLog('回退重试: FFmpeg 已启动 (libx264)', 'info'))
-                .on('progress', (progress) => {
-                  if (activeTasks.get(downloadId)?.isCancelled) return;
-                  const percent = Math.round(progress.percent || 0);
-                  metadata.timemark = progress.timemark;
-                  io.emit(`download-progress-${downloadId}`, { 
-                    percent,
-                    message: `回退转码中: ${progress.timemark}`,
-                    stage: 'encoding'
-                  });
-                })
-                .on('error', async (nestedErr, nStdout, nStderr) => {
-                   console.error('Fallback merge error:', nestedErr.message);
-                   const finalError = nStderr ? nStderr.split('\n').filter(l => l.trim()).pop() : nestedErr.message;
-                   sendLog(`回退合并失败: ${finalError}`, 'error');
-                   io.emit(`download-error-${downloadId}`, { error: `合并失败: ${finalError}` });
-                   metadata.progress = 0;
-                   await saveToHistory({ id: downloadId, ...metadata, status: 'error', error: `合并失败: ${finalError}`, completedAt: new Date().toLocaleString('zh-CN') });
-                   activeTasks.delete(downloadId);
-                })
-                .on('end', async () => {
-                  console.log('Fallback merge finished!');
-                  const downloadUrl = `/downloads/${safeFilename}`;
-                  io.emit(`download-complete-${downloadId}`, { url: downloadUrl, filename: safeFilename });
-                  await saveToHistory({ id: downloadId, ...metadata, status: 'completed', progress: 100, downloadUrl, completedAt: new Date().toLocaleString('zh-CN') });
-                  activeTasks.delete(downloadId);
-                })
-                .save(outputPath);
-                
-              return;
+            if (videoBitrate) retryCommand.videoBitrate(videoBitrate);
+            
+            if (format === 'mp4') {
+              retryCommand.audioCodec('aac');
+              retryCommand.outputOptions('-movflags +faststart');
             }
+            if (audioBitrate) retryCommand.audioBitrate(audioBitrate);
+            
+            retryCommand
+              .on('start', () => sendLog('回退重试: FFmpeg 已启动 (libx264)', 'info'))
+              .on('progress', (progress) => {
+                if (activeTasks.get(downloadId)?.isCancelled) return;
+                const percent = Math.round(progress.percent || 0);
+                metadata.timemark = progress.timemark;
+                io.emit(`download-progress-${downloadId}`, { 
+                  percent,
+                  message: `回退转码中: ${progress.timemark}`,
+                  stage: 'encoding'
+                });
+              })
+              .on('error', async (nestedErr, nStdout, nStderr) => {
+                 console.error('Fallback error:', nestedErr.message);
+                 const finalError = nStderr ? nStderr.split('\n').filter(l => l.trim()).pop() : nestedErr.message;
+                 sendLog(`转码失败 (回退后): ${finalError}`, 'error');
+                 io.emit(`download-error-${downloadId}`, { error: `转码失败: ${finalError}` });
+                 metadata.progress = 0;
+                 await saveToHistory({ id: downloadId, ...metadata, status: 'error', error: `转码失败: ${finalError}`, completedAt: new Date().toLocaleString('zh-CN') });
+                 activeTasks.delete(downloadId);
+              })
+              .on('end', async () => {
+                console.log('Fallback processing finished!');
+                const downloadUrl = `/downloads/${safeFilename}`;
+                io.emit(`download-complete-${downloadId}`, { url: downloadUrl, filename: safeFilename });
+                await saveToHistory({ id: downloadId, ...metadata, status: 'completed', stage: 'completed', progress: 100, downloadUrl, completedAt: new Date().toLocaleString('zh-CN') });
+                activeTasks.delete(downloadId);
+              })
+              .save(outputPath);
+              
+            return;
           }
 
           console.error('Merge error:', err.message);
