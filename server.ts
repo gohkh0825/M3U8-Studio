@@ -424,7 +424,7 @@ async function startServer() {
         throw mergeErr;
       }
 
-      const command = ffmpeg();
+      const command = ffmpeg(mergedTsPath);
       
       // Store command for cancellation
       const taskEntry = activeTasks.get(downloadId);
@@ -439,7 +439,6 @@ async function startServer() {
           '-hwaccel_output_format vaapi'
         ]);
       }
-      command.input(mergedTsPath);
       
       sendLog('正在启动 FFmpeg 进行视频转码/封装...', 'info');
 
