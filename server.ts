@@ -451,16 +451,13 @@ async function startServer() {
       } else {
         command.videoCodec(videoCodec);
         
-        // Ensure compatibility with most players
-        command.outputOptions('-pix_fmt yuv420p');
-        
-        // Optimization: Handle different codecs including GPU acceleration
+        // Ensure compatibility with most players (for CPU encoding)
         if (videoCodec === 'libx264' || videoCodec === 'libx265') {
+          command.outputOptions('-pix_fmt yuv420p');
           command.outputOptions(`-preset ${videoPreset}`);
         } else if (videoCodec === 'h264_vaapi') {
           // Linux VAAPI hardware acceleration (Intel/AMD on Linux)
           command.videoCodec('h264_vaapi');
-          // With -hwaccel_output_format vaapi, frames stay in GPU memory
         }
 
         if (videoBitrate) {
