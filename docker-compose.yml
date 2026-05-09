@@ -2,7 +2,13 @@ services:
   downloader:
     build: .
     ports:
-      - "3000:3000"
+      - "9199:3000"
     volumes:
-      - ./downloads:/app/downloads
+      - ./vol1/1000/m3u8/downloads:/app/downloads
+      - ./vol1/1000/m3u8/downloads/temp:/app/temp
+    devices:
+      - /dev/dri:/dev/dri  # 🌟 核心：将宿主机显卡设备映射进容器
+    group_add:
+      - video              # 🌟 赋权：加入 video 用户组，防止容器内 FFmpeg 没权限调用显卡
+    # privileged: true     # (备用方案)：如果加上面两段还是报显卡权限错误，就把这行前面的 # 删掉
     restart: always
