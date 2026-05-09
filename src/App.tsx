@@ -16,6 +16,7 @@ interface DownloadState {
   status: 'idle' | 'downloading' | 'completed' | 'error' | 'cancelled';
   progress: number;
   timemark: string;
+  stage?: 'downloading' | 'merging' | 'encoding' | 'completed';
   message?: string;
   error?: string;
   downloadUrl?: string;
@@ -104,7 +105,8 @@ export default function App() {
           ...d, 
           progress: update.percent || 0, 
           timemark: update.timemark || d.timemark,
-          message: update.message || d.message
+          message: update.message || d.message,
+          stage: update.stage || d.stage
         } : d
       ));
     });
@@ -114,6 +116,7 @@ export default function App() {
         d.id === dId ? { 
           ...d, 
           status: 'completed', 
+          stage: 'completed',
           downloadUrl: update.url, 
           progress: 100,
           completedAt: new Date().toLocaleString('zh-CN')
@@ -217,6 +220,7 @@ export default function App() {
       d.id === id ? { 
         ...d, 
         status: 'downloading', 
+        stage: 'downloading',
         progress: 0, 
         error: undefined, 
         message: '正在重新启动...',
@@ -310,6 +314,7 @@ export default function App() {
           url: task.url,
           filename: data.filename,
           status: 'downloading',
+          stage: 'downloading',
           progress: 0,
           timemark: '00:00:00',
           options: {
@@ -537,7 +542,19 @@ export default function App() {
 
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center justify-between mb-1">
-                              <h3 className="text-sm font-bold truncate pr-4">{download.filename}</h3>
+                              <div className="flex items-center gap-2 min-w-0">
+                                <h3 className="text-sm font-bold truncate">{download.filename}</h3>
+                                {download.stage && download.status === 'downloading' && (
+                                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
+                                    download.stage === 'downloading' ? 'bg-blue-500/20 text-blue-400' :
+                                    download.stage === 'merging' ? 'bg-amber-500/20 text-amber-400' :
+                                    'bg-purple-500/20 text-purple-400'
+                                  }`}>
+                                    {download.stage === 'downloading' ? '下载中' :
+                                     download.stage === 'merging' ? '合并中' : '转码中'}
+                                  </span>
+                                )}
+                              </div>
                               <span className="text-[10px] font-mono text-slate-500">{download.timemark}</span>
                             </div>
                             
@@ -730,7 +747,7 @@ export default function App() {
                         <option value="copy">流复制 (极速)</option>
                         <option value="libx264">H.264 (CPU)</option>
                         <option value="libx265">H.265 (CPU)</option>
-                        <option value="h264_amf">H.264 (AMD GPU)</option>
+                        <option value="h264_vaapi">H.264 (Linux GPU)</option>
                       </select>
                     </div>
                   </div>
