@@ -389,10 +389,11 @@ export default function App() {
           id: data.downloadId,
           url: task.url,
           filename: data.filename,
-          status: 'downloading',
+          status: 'idle',
           stage: 'downloading',
           progress: 0,
           timemark: '00:00:00',
+          message: '等待队列中...',
           options: {
             headers,
             format,
@@ -442,7 +443,7 @@ export default function App() {
             <Download className="text-white" size={18} />
           </div>
           <span className="text-lg font-bold tracking-tight">Media <span className="text-brand-400">Go</span></span>
-          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.5.0</span>
+          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.0.0</span>
         </div>
 
         <nav className="flex-1 px-4 py-4 space-y-2">

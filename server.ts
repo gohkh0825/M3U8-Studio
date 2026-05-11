@@ -686,21 +686,6 @@ async function startServer() {
     };
 
     checkQueue();
-  });s.delete(downloadId);
-        })
-        .save(outputPath);
-
-    } catch (err) {
-      if (axios.isCancel(err) || abortController.signal.aborted || activeTasks.get(downloadId)?.isCancelled) {
-        console.log(`Task ${downloadId} aborted during execution`);
-        return;
-      }
-      console.error('Download task failed:', err);
-      io.emit(`download-error-${downloadId}`, { error: err.message });
-      // Keep files for retry
-      // await fs.remove(taskTempDir).catch(console.error);
-      activeTasks.delete(downloadId);
-    }
   });
 
   // Vite middleware for development
