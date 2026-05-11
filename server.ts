@@ -94,6 +94,9 @@ async function startServer() {
   const PORT = 3000;
 
   // Track active tasks for cancellation and recovery
+  let maxConcurrentDownloads = 3;
+  let currentConcurrentDownloads = 0;
+
   const activeTasks = new Map<string, { 
     abortController: AbortController; 
     ffmpegCommand?: ffmpeg.FfmpegCommand;
@@ -107,8 +110,45 @@ async function startServer() {
       stage?: 'downloading' | 'merging' | 'encoding' | 'completed';
       logs: any[];
       options?: any;
-    }
+      status?: string;
+    };
+    run?: () => Promise<void>;
   }>();
+
+  function checkQueue() {
+    for (const [id, task] of activeTasks.entries()) {
+      if (task.metadata.status === 'idle' && !task.isCancelled) {
+        if (currentConcurrentDownloads < maxConcurrentDownloads) {
+          currentConcurrentDownloads++;
+          task.metadata.status = 'downloading';
+          saveToHistory({ id, ...task.metadata, status: 'downloading' });
+          
+          if (task.run) {
+            task.run().finally(() => {
+              currentConcurrentDownloads--;
+              checkQueue();
+            });
+          } else {
+            currentConcurrentDownloads--;
+          }
+        }
+      }
+    }
+  }
+
+  // API to configure concurrency
+  app.get('/api/settings/concurrency', (req, res) => {
+    res.json({ maxConcurrentDownloads });
+  });
+
+  app.post('/api/settings/concurrency', (req, res) => {
+    const { maxConcurrentDownloads: newMax } = req.body;
+    if (typeof newMax === 'number' && newMax >= 1 && newMax <= 10) {
+      maxConcurrentDownloads = newMax;
+      checkQueue();
+    }
+    res.json({ success: true, maxConcurrentDownloads });
+  });
 
   app.use(express.json());
   app.use('/downloads', express.static(downloadsDir));
@@ -197,12 +237,12 @@ async function startServer() {
       if (existingTask) {
         metadata = {
           ...existingTask,
-          status: 'downloading',
-          message: '正在重新启动下载...',
+          status: 'idle',
+          message: '等待重新启动下载...',
           progress: existingTask.progress || 0,
           logs: [...(existingTask.logs || []), {
             timestamp: new Date().toLocaleTimeString(),
-            message: '--- 重新启动下载任务 ---',
+            message: '--- 加入等待队列 ---',
             type: 'warning'
           }]
         };
@@ -214,15 +254,18 @@ async function startServer() {
         url,
         filename: safeFilename,
         progress: 0,
-        message: '正在解析 M3U8 列表...',
+        message: '等待队列中...',
         timemark: '00:00:00',
         logs: [] as any[],
-        options: { headers, format, videoBitrate, audioBitrate, videoCodec, videoPreset }
+        options: { headers, format, videoBitrate, audioBitrate, videoCodec, videoPreset },
+        status: 'idle'
       };
     }
     
-    activeTasks.set(downloadId, { abortController, isCancelled: false, metadata });
-    await saveToHistory({ id: downloadId, ...metadata, status: 'downloading' });
+    // We create the task, but wait for the queue to trigger run()
+    const taskEntry = { abortController, isCancelled: false, metadata, run: async () => {} };
+    activeTasks.set(downloadId, taskEntry);
+    await saveToHistory({ id: downloadId, ...metadata });
 
     const sendLog = async (message: string, type: 'info' | 'success' | 'warning' | 'error' = 'info') => {
       const log = {
@@ -232,17 +275,18 @@ async function startServer() {
       };
       metadata.logs.push(log);
       io.emit(`download-log-${downloadId}`, log);
-      // Throttle history saves for logs if necessary, but for now simple update
-      await saveToHistory({ id: downloadId, ...metadata, status: 'downloading' });
+      await saveToHistory({ id: downloadId, ...metadata });
     };
 
     res.json({ downloadId, filename: safeFilename });
 
-    try {
-      await fs.ensureDir(taskTempDir);
-      sendLog(`任务启动: ${safeFilename}`);
-      io.emit(`download-start-${downloadId}`, { message: '正在解析 M3U8 列表...' });
-      sendLog('正在解析 M3U8 列表...');
+    taskEntry.run = async () => {
+      return new Promise<void>(async (resolveTask) => {
+        try {
+          await fs.ensureDir(taskTempDir);
+          sendLog(`任务启动: ${safeFilename}`);
+          io.emit(`download-start-${downloadId}`, { message: '正在解析 M3U8 列表...' });
+          sendLog('正在解析 M3U8 列表...');
 
       // 1. Fetch and parse M3U8
       const axiosHeaders: Record<string, string> = {
@@ -562,6 +606,7 @@ async function startServer() {
                  metadata.progress = 0;
                  await saveToHistory({ id: downloadId, ...metadata, status: 'error', error: `转码失败: ${finalError}`, completedAt: new Date().toLocaleString('zh-CN') });
                  activeTasks.delete(downloadId);
+                 resolveTask();
               })
               .on('end', async () => {
                 console.log('Fallback processing finished!');
@@ -569,6 +614,7 @@ async function startServer() {
                 io.emit(`download-complete-${downloadId}`, { url: downloadUrl, filename: safeFilename });
                 await saveToHistory({ id: downloadId, ...metadata, status: 'completed', stage: 'completed', progress: 100, downloadUrl, completedAt: new Date().toLocaleString('zh-CN') });
                 activeTasks.delete(downloadId);
+                resolveTask();
               })
               .save(outputPath);
               
@@ -596,6 +642,7 @@ async function startServer() {
           // Rely on background cleanup instead of immediate deletion to allow retries
           // fs.remove(taskTempDir).catch(console.error);
           activeTasks.delete(downloadId);
+          resolveTask();
         })
         .on('end', async () => {
           console.log('Merge finished!');
@@ -618,6 +665,28 @@ async function startServer() {
           // Rely on background cleanup
           // await fs.remove(taskTempDir).catch(console.error);
           activeTasks.delete(downloadId);
+          resolveTask();
+        })
+        .save(outputPath);
+
+        } catch (err) {
+          if (axios.isCancel(err) || abortController.signal.aborted || activeTasks.get(downloadId)?.isCancelled) {
+            console.log(`Task ${downloadId} aborted during execution`);
+            resolveTask();
+            return;
+          }
+          console.error('Download task failed:', err);
+          io.emit(`download-error-${downloadId}`, { error: err.message });
+          // Keep files for retry
+          // await fs.remove(taskTempDir).catch(console.error);
+          activeTasks.delete(downloadId);
+          resolveTask();
+        }
+      });
+    };
+
+    checkQueue();
+  });s.delete(downloadId);
         })
         .save(outputPath);
 

@@ -52,10 +52,21 @@ export default function App() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [maxConcurrent, setMaxConcurrent] = useState<number>(3);
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
     socketRef.current = io();
+    
+    // Fetch settings logic
+    fetch('/api/settings/concurrency')
+      .then(res => res.json())
+      .then(data => {
+        if (data && data.maxConcurrentDownloads) {
+          setMaxConcurrent(data.maxConcurrentDownloads);
+        }
+      })
+      .catch(console.error);
     
     // Fetch history from server on mount
     const fetchHistory = async () => {
@@ -215,6 +226,19 @@ export default function App() {
     setDownloads(prev => prev.filter(d => d.status !== 'completed' && d.status !== 'error'));
   };
 
+  const updateMaxConcurrent = async (value: number) => {
+    setMaxConcurrent(value);
+    try {
+      await fetch('/api/settings/concurrency', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ maxConcurrentDownloads: value }),
+      });
+    } catch (err) {
+      console.error('Failed to update max concurrent downloads', err);
+    }
+  };
+
   const clearAll = async () => {
     const activeDownloads = downloads.filter(d => d.status === 'downloading');
     
@@ -271,11 +295,11 @@ export default function App() {
     setDownloads(prev => prev.map(d => 
       d.id === id ? { 
         ...d, 
-        status: 'downloading', 
+        status: 'idle', 
         stage: 'downloading',
         progress: 0, 
         error: undefined, 
-        message: '正在重新启动...',
+        message: '等待重新启动...',
         logs: [] 
       } : d
     ));
@@ -398,8 +422,8 @@ export default function App() {
 
   const filteredDownloads = useMemo(() => {
     return downloads.filter(d => {
-      if (activeTab === 'downloading') return d.status === 'downloading' || d.status === 'idle' || d.status === 'error' || d.status === 'cancelled';
-      if (activeTab === 'completed') return d.status === 'completed';
+      if (activeTab === 'downloading') return d.status === 'downloading' || d.status === 'idle';
+      if (activeTab === 'completed') return d.status === 'completed' || d.status === 'error' || d.status === 'cancelled';
       return true;
     });
   }, [downloads, activeTab]);
@@ -517,6 +541,23 @@ export default function App() {
                       <div className="absolute left-1 top-1 w-3 h-3 bg-white rounded-full" />
                     </div>
                   </div>
+                  <div className="flex flex-col gap-3 p-4 bg-white/5 rounded-xl border border-white/5">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-bold">最大同时下载数</p>
+                        <p className="text-xs text-slate-500">设置允许同时进行的下载任务数量 (1-10)</p>
+                      </div>
+                      <span className="text-xl font-bold font-mono text-brand-400">{maxConcurrent}</span>
+                    </div>
+                    <input 
+                      type="range" 
+                      min="1" 
+                      max="10" 
+                      value={maxConcurrent}
+                      onChange={(e) => updateMaxConcurrent(parseInt(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-brand-500"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -620,6 +661,8 @@ export default function App() {
                           <div className="w-10 h-10 bg-white/5 rounded-lg flex items-center justify-center shrink-0">
                             {download.status === 'completed' ? <CheckCircle2 size={20} className="text-emerald-500" /> :
                              download.status === 'error' ? <AlertCircle size={20} className="text-rose-500" /> :
+                             download.status === 'cancelled' ? <AlertCircle size={20} className="text-amber-500" /> :
+                             download.status === 'idle' ? <List size={20} className="text-slate-500" /> :
                              <Loader2 className="animate-spin text-brand-400" size={20} />}
                           </div>
 
