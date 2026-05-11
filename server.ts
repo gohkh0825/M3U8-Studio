@@ -96,6 +96,8 @@ async function startServer() {
   // Track active tasks for cancellation and recovery
   let maxConcurrentDownloads = 3;
   let currentConcurrentDownloads = 0;
+  let maxConcurrentFFmpeg = 1;
+  let currentConcurrentFFmpeg = 0;
 
   const activeTasks = new Map<string, { 
     abortController: AbortController; 
@@ -136,22 +138,26 @@ async function startServer() {
     }
   }
 
+  app.use(express.json());
+  app.use('/downloads', express.static(downloadsDir));
+
   // API to configure concurrency
   app.get('/api/settings/concurrency', (req, res) => {
-    res.json({ maxConcurrentDownloads });
+    res.json({ maxConcurrentDownloads, maxConcurrentFFmpeg });
   });
 
   app.post('/api/settings/concurrency', (req, res) => {
-    const { maxConcurrentDownloads: newMax } = req.body;
+    const { maxConcurrentDownloads: newMax, maxConcurrentFFmpeg: newMaxFFmpeg } = req.body;
     if (typeof newMax === 'number' && newMax >= 1 && newMax <= 10) {
       maxConcurrentDownloads = newMax;
       checkQueue();
     }
-    res.json({ success: true, maxConcurrentDownloads });
+    if (typeof newMaxFFmpeg === 'number' && newMaxFFmpeg >= 1 && newMaxFFmpeg <= 3) {
+      maxConcurrentFFmpeg = newMaxFFmpeg;
+      // Note: FFmpeg slots will be cleared as tasks finish
+    }
+    res.json({ success: true, maxConcurrentDownloads, maxConcurrentFFmpeg });
   });
-
-  app.use(express.json());
-  app.use('/downloads', express.static(downloadsDir));
 
   // API to get all tasks (history + active)
   app.get('/api/tasks', async (req, res) => {
@@ -335,11 +341,16 @@ async function startServer() {
       const m3u8Content = response.data;
       const lines = m3u8Content.split('\n');
       const segments: string[] = [];
+      let totalDuration = 0;
 
       sendLog(`解析成功，共发现 ${lines.length} 行内容`);
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i].trim();
+        if (line.startsWith('#EXTINF:')) {
+          const duration = parseFloat(line.split(':')[1]);
+          if (!isNaN(duration)) totalDuration += duration;
+        }
         if (line && !line.startsWith('#')) {
           try {
             // Use URL constructor for robust relative path resolution
@@ -356,7 +367,8 @@ async function startServer() {
         throw new Error('未在 M3U8 中找到视频分片');
       }
 
-      sendLog(`准备下载 ${segments.length} 个视频分片...`);
+      metadata.totalDuration = totalDuration;
+      sendLog(`准备下载 ${segments.length} 个视频分片 (预估时长: ${Math.round(totalDuration)} 秒)...`);
 
       io.emit(`download-start-${downloadId}`, { message: `找到 ${segments.length} 个分片，开始下载...` });
 
@@ -434,12 +446,25 @@ async function startServer() {
 
       if (activeTasks.get(downloadId)?.isCancelled) return;
 
+      // New: Wait for FFmpeg slot before merging/encoding
+      metadata.message = '等待 FFmpeg 队列...';
+      metadata.stage = 'merging';
+      io.emit(`download-progress-${downloadId}`, { percent: metadata.progress, message: '等待 FFmpeg 队列...', stage: 'merging' });
+      sendLog('已加入 FFmpeg 转码队列，正在等待空闲槽位...', 'warning');
+
+      while (currentConcurrentFFmpeg >= maxConcurrentFFmpeg) {
+        if (activeTasks.get(downloadId)?.isCancelled) return;
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+
+      currentConcurrentFFmpeg++;
+
       // 3. Prepare FFmpeg concat list
       sendLog('正在配置 FFmpeg 分片合并...', 'info');
-      metadata.progress = 0;
+      // Keep progress at 100 from download phase instead of resetting to 0
       metadata.stage = 'merging';
       metadata.message = '配置合并阶段...';
-      io.emit(`download-progress-${downloadId}`, { percent: 0, message: '配置合并阶段...', stage: 'merging' });
+      io.emit(`download-progress-${downloadId}`, { percent: 100, message: '配置合并阶段...', stage: 'merging' });
       
       const concatListPath = path.join(taskTempDir, 'concat_list.txt');
       let concatListContent = '';
@@ -528,14 +553,27 @@ async function startServer() {
         })
         .on('progress', (progress) => {
           if (activeTasks.get(downloadId)?.isCancelled) return;
-          const percent = Math.round(progress.percent || 0);
-          metadata.progress = percent;
+          
+          let percent = progress.percent;
+          
+          // Fallback progress calculation if FFmpeg doesn't report it
+          if ((percent === undefined || percent <= 0) && metadata.totalDuration > 0) {
+            const timemark = progress.timemark; // HH:MM:SS.MS
+            const parts = timemark.split(':');
+            if (parts.length === 3) {
+              const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
+              percent = (seconds / metadata.totalDuration) * 100;
+            }
+          }
+          
+          const finalPercent = Math.min(99, Math.round(percent || 0));
+          metadata.progress = finalPercent;
           metadata.timemark = progress.timemark || metadata.timemark;
           metadata.message = videoCodec.includes('vaapi') ? '正在使用硬件加速转码...' : '正在进行视频转码/封装...';
           
-          sendLog(`转码进度: ${percent}% (时间点: ${progress.timemark})`);
+          sendLog(`转码进度: ${finalPercent}% (时间点: ${progress.timemark})`);
           io.emit(`download-progress-${downloadId}`, { 
-            percent,
+            percent: finalPercent,
             message: metadata.message,
             timemark: metadata.timemark,
             stage: 'encoding'
@@ -590,10 +628,20 @@ async function startServer() {
               .on('start', () => sendLog('回退重试: FFmpeg 已启动 (libx264)', 'info'))
               .on('progress', (progress) => {
                 if (activeTasks.get(downloadId)?.isCancelled) return;
-                const percent = Math.round(progress.percent || 0);
+                
+                let percent = progress.percent;
+                if ((percent === undefined || percent <= 0) && metadata.totalDuration > 0) {
+                  const parts = progress.timemark.split(':');
+                  if (parts.length === 3) {
+                    const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
+                    percent = (seconds / metadata.totalDuration) * 100;
+                  }
+                }
+                
+                const finalPercent = Math.min(99, Math.round(percent || 0));
                 metadata.timemark = progress.timemark;
                 io.emit(`download-progress-${downloadId}`, { 
-                  percent,
+                  percent: finalPercent,
                   message: `回退转码中: ${progress.timemark}`,
                   stage: 'encoding'
                 });
@@ -606,6 +654,7 @@ async function startServer() {
                  metadata.progress = 0;
                  await saveToHistory({ id: downloadId, ...metadata, status: 'error', error: `转码失败: ${finalError}`, completedAt: new Date().toLocaleString('zh-CN') });
                  activeTasks.delete(downloadId);
+                 currentConcurrentFFmpeg--;
                  resolveTask();
               })
               .on('end', async () => {
@@ -614,6 +663,7 @@ async function startServer() {
                 io.emit(`download-complete-${downloadId}`, { url: downloadUrl, filename: safeFilename });
                 await saveToHistory({ id: downloadId, ...metadata, status: 'completed', stage: 'completed', progress: 100, downloadUrl, completedAt: new Date().toLocaleString('zh-CN') });
                 activeTasks.delete(downloadId);
+                currentConcurrentFFmpeg--;
                 resolveTask();
               })
               .save(outputPath);
@@ -642,6 +692,7 @@ async function startServer() {
           // Rely on background cleanup instead of immediate deletion to allow retries
           // fs.remove(taskTempDir).catch(console.error);
           activeTasks.delete(downloadId);
+          currentConcurrentFFmpeg--;
           resolveTask();
         })
         .on('end', async () => {
@@ -665,6 +716,7 @@ async function startServer() {
           // Rely on background cleanup
           // await fs.remove(taskTempDir).catch(console.error);
           activeTasks.delete(downloadId);
+          currentConcurrentFFmpeg--;
           resolveTask();
         })
         .save(outputPath);
@@ -672,6 +724,9 @@ async function startServer() {
         } catch (err) {
           if (axios.isCancel(err) || abortController.signal.aborted || activeTasks.get(downloadId)?.isCancelled) {
             console.log(`Task ${downloadId} aborted during execution`);
+            if (metadata.stage === 'merging' || metadata.stage === 'encoding') {
+              currentConcurrentFFmpeg--;
+            }
             resolveTask();
             return;
           }
@@ -679,6 +734,9 @@ async function startServer() {
           io.emit(`download-error-${downloadId}`, { error: err.message });
           // Keep files for retry
           // await fs.remove(taskTempDir).catch(console.error);
+          if (metadata.stage === 'merging' || metadata.stage === 'encoding') {
+            currentConcurrentFFmpeg--;
+          }
           activeTasks.delete(downloadId);
           resolveTask();
         }

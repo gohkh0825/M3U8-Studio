@@ -53,6 +53,7 @@ export default function App() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [maxConcurrent, setMaxConcurrent] = useState<number>(3);
+  const [maxFFmpeg, setMaxFFmpeg] = useState<number>(1);
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
@@ -62,8 +63,9 @@ export default function App() {
     fetch('/api/settings/concurrency')
       .then(res => res.json())
       .then(data => {
-        if (data && data.maxConcurrentDownloads) {
-          setMaxConcurrent(data.maxConcurrentDownloads);
+        if (data) {
+          if (data.maxConcurrentDownloads) setMaxConcurrent(data.maxConcurrentDownloads);
+          if (data.maxConcurrentFFmpeg) setMaxFFmpeg(data.maxConcurrentFFmpeg);
         }
       })
       .catch(console.error);
@@ -232,10 +234,23 @@ export default function App() {
       await fetch('/api/settings/concurrency', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ maxConcurrentDownloads: value }),
+        body: JSON.stringify({ maxConcurrentDownloads: value, maxConcurrentFFmpeg: maxFFmpeg }),
       });
     } catch (err) {
       console.error('Failed to update max concurrent downloads', err);
+    }
+  };
+
+  const updateMaxFFmpeg = async (value: number) => {
+    setMaxFFmpeg(value);
+    try {
+      await fetch('/api/settings/concurrency', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ maxConcurrentDownloads: maxConcurrent, maxConcurrentFFmpeg: value }),
+      });
+    } catch (err) {
+      console.error('Failed to update max concurrent ffmpeg', err);
     }
   };
 
@@ -443,7 +458,7 @@ export default function App() {
             <Download className="text-white" size={18} />
           </div>
           <span className="text-lg font-bold tracking-tight">Media <span className="text-brand-400">Go</span></span>
-          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.0.0</span>
+          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.0.3</span>
         </div>
 
         <nav className="flex-1 px-4 py-4 space-y-2">
@@ -556,6 +571,23 @@ export default function App() {
                       max="10" 
                       value={maxConcurrent}
                       onChange={(e) => updateMaxConcurrent(parseInt(e.target.value))}
+                      className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-brand-500"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-3 p-4 bg-white/5 rounded-xl border border-white/5">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-bold">最大 FFmpeg 并发数</p>
+                        <p className="text-xs text-slate-500">设置允许同时进行的格式转换/合并任务数量 (1-3)</p>
+                      </div>
+                      <span className="text-xl font-bold font-mono text-brand-400">{maxFFmpeg}</span>
+                    </div>
+                    <input 
+                      type="range" 
+                      min="1" 
+                      max="3" 
+                      value={maxFFmpeg}
+                      onChange={(e) => updateMaxFFmpeg(parseInt(e.target.value))}
                       className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-brand-500"
                     />
                   </div>
