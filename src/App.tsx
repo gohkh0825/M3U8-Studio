@@ -527,7 +527,7 @@ export default function App() {
             <Download className="text-white" size={18} />
           </div>
           <span className="text-lg font-bold tracking-tight">Media <span className="text-brand-400">Go</span></span>
-          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.2.0</span>
+          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.1.3</span>
         </div>
 
         <nav className="flex-1 px-4 py-4 space-y-2">
