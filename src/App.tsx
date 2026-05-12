@@ -16,6 +16,7 @@ interface DownloadState {
   status: 'idle' | 'downloading' | 'completed' | 'error' | 'cancelled' | 'paused';
   progress: number;
   timemark: string;
+  speed?: string;
   stage?: 'downloading' | 'merging' | 'encoding' | 'completed';
   message?: string;
   error?: string;
@@ -47,6 +48,7 @@ export default function App() {
   const [format, setFormat] = useState('mp4');
   const [videoCodec, setVideoCodec] = useState('copy');
   const [videoPreset, setVideoPreset] = useState('fast');
+  const [searchQuery, setSearchQuery] = useState('');
   const [videoBitrate, setVideoBitrate] = useState('');
   const [audioBitrate, setAudioBitrate] = useState('');
   const [useVfScale, setUseVfScale] = useState(false);
@@ -122,6 +124,7 @@ export default function App() {
           progress: update.percent || 0, 
           timemark: update.timemark || d.timemark,
           message: update.message || d.message,
+          speed: update.speed || d.speed,
           stage: update.stage || d.stage,
           status: update.status || d.status
         } : d
@@ -499,11 +502,16 @@ export default function App() {
 
   const filteredDownloads = useMemo(() => {
     return downloads.filter(d => {
-      if (activeTab === 'downloading') return d.status === 'downloading' || d.status === 'idle';
+      const matchSearch = !searchQuery || 
+        d.filename.toLowerCase().includes(searchQuery.toLowerCase()) || 
+        d.url.toLowerCase().includes(searchQuery.toLowerCase());
+        
+      if (!matchSearch) return false;
+      if (activeTab === 'downloading') return d.status === 'downloading' || d.status === 'idle' || d.status === 'paused';
       if (activeTab === 'completed') return d.status === 'completed' || d.status === 'error' || d.status === 'cancelled';
       return true;
     });
-  }, [downloads, activeTab]);
+  }, [downloads, activeTab, searchQuery]);
 
   const visibleIds = useMemo(() => filteredDownloads.map(d => d.id), [filteredDownloads]);
   const selectedCount = useMemo(() => visibleIds.filter(id => selectedIds.has(id)).length, [visibleIds, selectedIds]);
@@ -519,7 +527,7 @@ export default function App() {
             <Download className="text-white" size={18} />
           </div>
           <span className="text-lg font-bold tracking-tight">Media <span className="text-brand-400">Go</span></span>
-          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.1.1</span>
+          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.2.0</span>
         </div>
 
         <nav className="flex-1 px-4 py-4 space-y-2">
@@ -679,7 +687,7 @@ export default function App() {
           ) : (
             <div className="space-y-6">
               {/* List Header Actions */}
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
                 <div className="flex items-center gap-4">
                   <label 
                     className="flex items-center gap-2 cursor-pointer group"
@@ -695,24 +703,46 @@ export default function App() {
                       {isAllSelected && <div className="w-1.5 h-1.5 bg-white rounded-sm" />}
                       {isIndeterminate && <div className="w-2 h-0.5 bg-brand-500" />}
                     </div>
-                    <span className="text-xs font-bold text-slate-400 group-hover:text-slate-200 transition-colors">全选</span>
+                    <span className="text-xs font-bold text-slate-400 group-hover:text-slate-200 transition-colors">全选 ({selectedCount})</span>
                   </label>
+                  
+                  {selectedIds.size > 0 && (
+                    <div className="flex items-center gap-2 animate-in zoom-in-95 duration-200">
+                      <button 
+                        onClick={batchDelete}
+                        className="px-2 py-1 text-[10px] font-bold text-rose-400 bg-rose-500/10 hover:bg-rose-500/20 rounded border border-rose-500/20 transition-all"
+                      >
+                        批量删除
+                      </button>
+                      <button 
+                        onClick={batchCancel}
+                        className="px-2 py-1 text-[10px] font-bold text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 rounded border border-amber-500/20 transition-all"
+                      >
+                        批量取消
+                      </button>
+                    </div>
+                  )}
                 </div>
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={batchDelete}
-                    disabled={selectedIds.size === 0}
-                    className="px-3 py-1.5 text-[11px] font-bold text-slate-400 hover:text-rose-400 bg-white/5 hover:bg-rose-500/10 rounded-lg border border-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
-                  >
-                    删除
-                  </button>
-                  <button 
-                    onClick={batchCancel}
-                    disabled={selectedIds.size === 0}
-                    className="px-3 py-1.5 text-[11px] font-bold text-slate-400 hover:text-amber-400 bg-white/5 hover:bg-amber-500/10 rounded-lg border border-white/5 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
-                  >
-                    取消
-                  </button>
+
+                <div className="relative group max-w-xs w-full sm:w-64">
+                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 group-hover:text-brand-400 transition-colors">
+                    <Search size={14} />
+                  </div>
+                  <input 
+                    type="text" 
+                    placeholder="搜索任务..." 
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full bg-slate-900 border border-dark-border rounded-xl py-1.5 pl-9 pr-4 text-xs focus:ring-1 focus:ring-brand-500/50 focus:border-brand-500 outline-none transition-all"
+                  />
+                  {searchQuery && (
+                    <button 
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-600 hover:text-white"
+                    >
+                      <X size={12} />
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -728,7 +758,17 @@ export default function App() {
                       <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-4">
                         <Layers size={32} className="opacity-20" />
                       </div>
-                      <p className="text-sm font-bold">暂无数据</p>
+                      <p className="text-sm font-bold">
+                        {searchQuery ? `未找到关于 "${searchQuery}" 的结果` : '暂无数据'}
+                      </p>
+                      {searchQuery && (
+                        <button 
+                          onClick={() => setSearchQuery('')}
+                          className="mt-2 text-xs text-brand-400 hover:underline"
+                        >
+                          清除搜索条件
+                        </button>
+                      )}
                     </motion.div>
                   ) : (
                     filteredDownloads.map((download) => (
@@ -776,7 +816,14 @@ export default function App() {
                                   </span>
                                 )}
                               </div>
-                              <span className="text-[10px] font-mono text-slate-500">{download.timemark}</span>
+                              <div className="flex items-center gap-2">
+                                {download.status === 'downloading' && download.speed && (
+                                  <span className="text-[10px] font-mono text-brand-400 font-bold bg-brand-500/10 px-1.5 py-0.5 rounded leading-none">
+                                    {download.speed}
+                                  </span>
+                                )}
+                                <span className="text-[10px] font-mono text-slate-500">{download.timemark}</span>
+                              </div>
                             </div>
                             
                             <div className="flex items-center gap-3">

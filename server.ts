@@ -110,6 +110,7 @@ async function startServer() {
       progress: number;
       message: string;
       timemark: string;
+      speed: string;
       stage?: 'downloading' | 'merging' | 'encoding' | 'completed';
       logs: any[];
       options?: any;
@@ -312,6 +313,7 @@ async function startServer() {
         progress: 0,
         message: '等待队列中...',
         timemark: '00:00:00',
+        speed: '0 KB/s',
         logs: [] as any[],
         options: { headers, format, videoBitrate, audioBitrate, videoCodec, videoPreset, useVfScale },
         status: 'idle'
@@ -624,17 +626,22 @@ async function startServer() {
       // 2. Download segments
       const segmentFiles: string[] = [];
       const batchSize = 5; // Download 5 segments at a time
+      let lastBatchTime = Date.now();
+      let lastBatchLoaded = 0;
       
       for (let i = 0; i < segments.length; i += batchSize) {
         // Handle pause
         while (activeTasks.get(downloadId)?.isPaused) {
           if (activeTasks.get(downloadId)?.isCancelled) return;
           await new Promise(resolve => setTimeout(resolve, 1000));
+          lastBatchTime = Date.now(); // Reset speed timer on resume
         }
 
         if (activeTasks.get(downloadId)?.isCancelled) return;
 
         const batch = segments.slice(i, i + batchSize);
+        let batchLoaded = 0;
+
         await Promise.all(batch.map(async (segmentUrl, index) => {
           const segmentIndex = i + index;
           const segmentPath = path.join(taskTempDir, `segment_${segmentIndex.toString().padStart(5, '0')}.ts`);
@@ -645,6 +652,7 @@ async function startServer() {
               const stats = await fs.stat(segmentPath);
               if (stats.size > 0) {
                 segmentFiles[segmentIndex] = segmentPath;
+                batchLoaded += stats.size;
                 return;
               }
             }
@@ -658,6 +666,7 @@ async function startServer() {
             if (segResponse.data.length === 0) throw new Error('Empty segment');
             await fs.writeFile(segmentPath, segResponse.data);
             segmentFiles[segmentIndex] = segmentPath;
+            batchLoaded += segResponse.data.length;
           } catch (err) {
             if (axios.isCancel(err) || abortController.signal.aborted) return;
             
@@ -686,15 +695,30 @@ async function startServer() {
           }
         }));
 
+        const currentTime = Date.now();
+        const timeDiff = (currentTime - lastBatchTime) / 1000; // seconds
+        let speedStr = '0 KB/s';
+        if (timeDiff > 0) {
+          const speedBps = batchLoaded / timeDiff;
+          if (speedBps > 1024 * 1024) {
+            speedStr = `${(speedBps / (1024 * 1024)).toFixed(2)} MB/s`;
+          } else {
+            speedStr = `${(speedBps / 1024).toFixed(1)} KB/s`;
+          }
+        }
+        lastBatchTime = currentTime;
+
         const progress = Math.round(((i + batch.length) / segments.length) * 100);
         metadata.progress = progress;
         metadata.stage = 'downloading';
         metadata.message = `正在下载分片: ${i + batch.length}/${segments.length}`;
-        sendLog(`下载进度: ${i + batch.length}/${segments.length} (${progress}%)`);
+        metadata.speed = speedStr;
+        sendLog(`下载进度: ${i + batch.length}/${segments.length} (${progress}%) @ ${speedStr}`);
         io.emit(`download-progress-${downloadId}`, { 
           percent: progress,
           message: metadata.message,
-          stage: 'downloading'
+          stage: 'downloading',
+          speed: speedStr
         });
         await saveToHistory({ id: downloadId, ...metadata, status: 'downloading' });
       }
