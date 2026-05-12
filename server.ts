@@ -209,7 +209,7 @@ async function startServer() {
 
     // API to start download
   app.post('/api/download', async (req, res) => {
-    let { url, filename, headers, format = 'mp4', videoBitrate, audioBitrate, videoCodec = 'copy', videoPreset = 'fast', downloadId: existingId } = req.body;
+    let { url, filename, headers, format = 'mp4', videoBitrate, audioBitrate, videoCodec = 'copy', videoPreset = 'fast', useVfScale = false, downloadId: existingId } = req.body;
 
     if (!url) {
       return res.status(400).json({ error: 'URL is required' });
@@ -263,7 +263,7 @@ async function startServer() {
         message: '等待队列中...',
         timemark: '00:00:00',
         logs: [] as any[],
-        options: { headers, format, videoBitrate, audioBitrate, videoCodec, videoPreset },
+        options: { headers, format, videoBitrate, audioBitrate, videoCodec, videoPreset, useVfScale },
         status: 'idle'
       };
     }
@@ -513,6 +513,12 @@ async function startServer() {
         if (videoCodec === 'h264_vaapi') {
           // Linux VAAPI hardware acceleration (Intel/AMD on Linux)
           command.videoCodec('h264_vaapi');
+          
+          if (useVfScale) {
+            command.videoFilters('format=nv12,scale=1920:1080,hwupload');
+          } else {
+            command.videoFilters('format=vaapi|nv12');
+          }
         } else {
           command.videoCodec(videoCodec);
           // Ensure compatibility with most players (for CPU encoding)

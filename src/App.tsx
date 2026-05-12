@@ -29,6 +29,7 @@ interface DownloadState {
     videoPreset?: string;
     videoBitrate?: string;
     audioBitrate?: string;
+    useVfScale?: boolean;
   };
   retryCount?: number;
 }
@@ -48,6 +49,7 @@ export default function App() {
   const [videoPreset, setVideoPreset] = useState('fast');
   const [videoBitrate, setVideoBitrate] = useState('');
   const [audioBitrate, setAudioBitrate] = useState('');
+  const [useVfScale, setUseVfScale] = useState(false);
   const [downloads, setDownloads] = useState<DownloadState[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -395,7 +397,8 @@ export default function App() {
             videoCodec,
             videoPreset,
             videoBitrate: videoBitrate ? `${videoBitrate}k` : undefined,
-            audioBitrate: audioBitrate ? `${audioBitrate}k` : undefined
+            audioBitrate: audioBitrate ? `${audioBitrate}k` : undefined,
+            useVfScale
           }),
         });
 
@@ -415,7 +418,8 @@ export default function App() {
             videoCodec,
             videoPreset,
             videoBitrate: videoBitrate ? `${videoBitrate}k` : undefined,
-            audioBitrate: audioBitrate ? `${audioBitrate}k` : undefined
+            audioBitrate: audioBitrate ? `${audioBitrate}k` : undefined,
+            useVfScale
           }
         };
 
@@ -458,7 +462,7 @@ export default function App() {
             <Download className="text-white" size={18} />
           </div>
           <span className="text-lg font-bold tracking-tight">Media <span className="text-brand-400">Go</span></span>
-          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.0.3</span>
+          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.0.6</span>
         </div>
 
         <nav className="flex-1 px-4 py-4 space-y-2">
@@ -993,6 +997,21 @@ export default function App() {
                                   onChange={(e) => setAudioBitrate(e.target.value)}
                                 />
                               </div>
+                            </div>
+
+                            <div className="pt-2">
+                              <label className="flex items-center gap-3 p-4 bg-white/5 rounded-xl border border-white/5 cursor-pointer hover:bg-white/10 transition-colors group">
+                                <input 
+                                  type="checkbox" 
+                                  className="w-4 h-4 rounded border-slate-700 text-brand-500 focus:ring-brand-500 bg-slate-800"
+                                  checked={useVfScale}
+                                  onChange={(e) => setUseVfScale(e.target.checked)}
+                                />
+                                <div>
+                                  <p className="text-sm font-bold group-hover:text-slate-200 transition-colors">强制硬件压缩规模 (VAAPI)</p>
+                                  <p className="text-[10px] text-slate-500">添加 -vf "format=nv12,scale=1920:1080,hwupload" 强制 1080p 输出</p>
+                                </div>
+                              </label>
                             </div>
                           </div>
                         </motion.div>
