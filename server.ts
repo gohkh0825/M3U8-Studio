@@ -103,6 +103,7 @@ async function startServer() {
     abortController: AbortController; 
     ffmpegCommand?: ffmpeg.FfmpegCommand;
     isCancelled: boolean;
+    isPaused: boolean;
     metadata: {
       url: string;
       filename: string;
@@ -207,6 +208,55 @@ async function startServer() {
     }
   });
 
+  // API to pause download
+  app.post('/api/pause', async (req, res) => {
+    const { downloadId } = req.body;
+    if (!downloadId) return res.status(400).json({ error: 'downloadId is required' });
+
+    const task = activeTasks.get(downloadId);
+    if (task) {
+      if (task.metadata.stage !== 'downloading') {
+        return res.status(400).json({ error: 'Only downloading stage can be paused' });
+      }
+      task.isPaused = true;
+      task.metadata.status = 'paused';
+      task.metadata.message = '已暂停下载';
+      await saveToHistory({ id: downloadId, ...task.metadata });
+      io.emit(`download-progress-${downloadId}`, { 
+        percent: task.metadata.progress, 
+        message: '已暂停下载', 
+        stage: 'downloading',
+        status: 'paused'
+      });
+      res.json({ success: true });
+    } else {
+      res.status(404).json({ error: 'Task not found' });
+    }
+  });
+
+  // API to resume download
+  app.post('/api/resume', async (req, res) => {
+    const { downloadId } = req.body;
+    if (!downloadId) return res.status(400).json({ error: 'downloadId is required' });
+
+    const task = activeTasks.get(downloadId);
+    if (task) {
+      task.isPaused = false;
+      task.metadata.status = 'downloading';
+      task.metadata.message = '正在继续下载...';
+      await saveToHistory({ id: downloadId, ...task.metadata });
+      io.emit(`download-progress-${downloadId}`, { 
+        percent: task.metadata.progress, 
+        message: '正在继续下载...', 
+        stage: 'downloading',
+        status: 'downloading'
+      });
+      res.json({ success: true });
+    } else {
+      res.status(404).json({ error: 'Task not found' });
+    }
+  });
+
     // API to start download
   app.post('/api/download', async (req, res) => {
     let { url, filename, headers, format = 'mp4', videoBitrate, audioBitrate, videoCodec = 'copy', videoPreset = 'fast', useVfScale = false, downloadId: existingId } = req.body;
@@ -269,7 +319,7 @@ async function startServer() {
     }
     
     // We create the task, but wait for the queue to trigger run()
-    const taskEntry = { abortController, isCancelled: false, metadata, run: async () => {} };
+    const taskEntry = { abortController, isCancelled: false, isPaused: false, metadata, run: async () => {} };
     activeTasks.set(downloadId, taskEntry);
     await saveToHistory({ id: downloadId, ...metadata });
 
@@ -291,6 +341,205 @@ async function startServer() {
         try {
           await fs.ensureDir(taskTempDir);
           sendLog(`任务启动: ${safeFilename}`);
+
+          // Check if we can skip download phase (retry with existing files)
+          const concatListPath = path.join(taskTempDir, 'concat_list.txt');
+          const hasFiles = await fs.pathExists(taskTempDir) && (await fs.readdir(taskTempDir)).some(f => f.endsWith('.ts'));
+          const skipDownload = !!existingId && await fs.pathExists(concatListPath) && hasFiles;
+
+          if (skipDownload) {
+            sendLog('检测到本地已存在分片，正在跳过下载直接进入合并阶段...', 'success');
+            // Jump to FFmpeg merging phase
+            await gotoMergingPhase();
+            return;
+          }
+
+          async function gotoMergingPhase(segmentsCount?: number) {
+            if (activeTasks.get(downloadId)?.isCancelled) return;
+
+            // New: Wait for FFmpeg slot before merging/encoding
+            metadata.message = '等待 FFmpeg 队列...';
+            metadata.stage = 'merging';
+            io.emit(`download-progress-${downloadId}`, { percent: metadata.progress || 100, message: '等待 FFmpeg 队列...', stage: 'merging' });
+            sendLog('已加入 FFmpeg 转码队列，正在等待空闲槽位...', 'warning');
+
+            while (currentConcurrentFFmpeg >= maxConcurrentFFmpeg) {
+              if (activeTasks.get(downloadId)?.isCancelled) return;
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+
+            currentConcurrentFFmpeg++;
+
+            // 3. Prepare FFmpeg concat list (re-verify or use existing)
+            sendLog('正在配置 FFmpeg 分片合并...', 'info');
+            metadata.stage = 'merging';
+            metadata.message = '配置合并阶段...';
+            io.emit(`download-progress-${downloadId}`, { percent: 100, message: '配置合并阶段...', stage: 'merging' });
+            
+            const command = ffmpeg();
+            command.input(concatListPath);
+            
+            const inputOptions = ['-f', 'concat', '-safe', '0'];
+
+            if (videoCodec === 'h264_vaapi') {
+              inputOptions.push('-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi');
+              if (fs.existsSync('/dev/dri/renderD128')) {
+                inputOptions.push('-vaapi_device', '/dev/dri/renderD128');
+              }
+            }
+            
+            command.inputOptions(inputOptions);
+            
+            // Store command for cancellation
+            const taskEntry = activeTasks.get(downloadId);
+            if (taskEntry) {
+              taskEntry.ffmpegCommand = command;
+            }
+            
+            sendLog('正在启动 FFmpeg 进行视频转码/封装...', 'info');
+
+            // Optimization: Use all available CPU cores
+            command.outputOptions('-threads 0');
+
+            if (videoCodec === 'copy') {
+              command.outputOptions('-c copy');
+            } else {
+              // Optimization: Handle different codecs including GPU acceleration
+              if (videoCodec === 'h264_vaapi') {
+                // Linux VAAPI hardware acceleration (Intel/AMD on Linux)
+                command.videoCodec('h264_vaapi');
+                
+                if (useVfScale) {
+                  command.videoFilters('scale_vaapi=w=1920:h=1080,format=vaapi');
+                } else {
+                  command.videoFilters('format=vaapi|nv12');
+                }
+              } else {
+                command.videoCodec(videoCodec);
+                // Ensure compatibility with most players (for CPU encoding)
+                if (videoCodec === 'libx264' || videoCodec === 'libx265') {
+                  command.outputOptions('-pix_fmt yuv420p');
+                  command.outputOptions(`-preset ${videoPreset}`);
+                }
+              }
+
+              if (videoBitrate) {
+                const vb = /^\d+$/.test(videoBitrate) ? `${videoBitrate}k` : videoBitrate;
+                command.videoBitrate(vb);
+              }
+              
+              // Optimization: Ensure audio is AAC for MP4 compatibility if re-encoding
+              if (format === 'mp4') {
+                command.audioCodec('aac');
+              }
+
+              if (audioBitrate) {
+                const ab = /^\d+$/.test(audioBitrate) ? `${audioBitrate}k` : audioBitrate;
+                command.audioBitrate(ab);
+              }
+            }
+
+            // Optimization: Add faststart for MP4 to allow web playback before full download
+            if (format === 'mp4') {
+              command.outputOptions('-movflags +faststart');
+              if (videoCodec === 'copy') {
+                command.outputOptions('-bsf:a aac_adtstoasc');
+              }
+            }
+
+            return new Promise<void>((resolve, reject) => {
+              command
+                .on('start', (commandLine) => {
+                  sendLog(`FFmpeg 命令已启动`);
+                  console.log('Spawned Ffmpeg for task: ' + commandLine);
+                })
+                .on('progress', (progress) => {
+                  if (activeTasks.get(downloadId)?.isCancelled) return;
+                  
+                  let percent = progress.percent;
+                  
+                  // Fallback progress calculation if FFmpeg doesn't report it
+                  if ((percent === undefined || percent <= 0) && metadata.totalDuration > 0) {
+                    const timemark = progress.timemark; // HH:MM:SS.MS
+                    const parts = timemark.split(':');
+                    if (parts.length === 3) {
+                      const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
+                      percent = (seconds / metadata.totalDuration) * 100;
+                    }
+                  }
+                  
+                  const finalPercent = Math.min(99, Math.round(percent || 0));
+                  metadata.progress = finalPercent;
+                  metadata.timemark = progress.timemark || metadata.timemark;
+                  metadata.message = videoCodec.includes('vaapi') ? '正在使用硬件加速转码...' : '正在进行视频转码/封装...';
+                  
+                  sendLog(`转码进度: ${finalPercent}% (时间点: ${progress.timemark})`);
+                  io.emit(`download-progress-${downloadId}`, { 
+                    percent: finalPercent,
+                    message: metadata.message,
+                    timemark: metadata.timemark,
+                    stage: 'encoding'
+                  });
+                })
+                .on('error', async (err, stdout, stderr) => {
+                  if (activeTasks.get(downloadId)?.isCancelled) {
+                    sendLog('任务已取消', 'warning');
+                    await saveToHistory({ id: downloadId, ...metadata, status: 'cancelled' });
+                    io.emit(`download-cancelled-${downloadId}`);
+                    console.log(`Ffmpeg process for ${downloadId} was killed (cancelled)`);
+                    currentConcurrentFFmpeg--;
+                    resolve();
+                    return;
+                  }
+
+                  console.error('Merge error:', err.message);
+                  if (stderr) {
+                    console.error('FFmpeg stderr:', stderr);
+                    sendLog(`FFmpeg 错误: ${stderr.split('\n').pop()}`, 'error');
+                  }
+                  const errorMsg = stderr ? stderr.split('\n').filter(l => l.trim()).pop() : err.message;
+                  sendLog(`合并失败: ${errorMsg}`, 'error');
+                  io.emit(`download-error-${downloadId}`, { error: `合并失败: ${errorMsg}` });
+                  
+                  metadata.progress = 0;
+                  await saveToHistory({ 
+                    id: downloadId, 
+                    ...metadata, 
+                    status: 'error', 
+                    error: `合并失败: ${errorMsg}`,
+                    completedAt: new Date().toLocaleString('zh-CN')
+                  });
+
+                  activeTasks.delete(downloadId);
+                  currentConcurrentFFmpeg--;
+                  resolve();
+                })
+                .on('end', async () => {
+                  console.log('Merge finished!');
+                  const downloadUrl = `/downloads/${safeFilename}`;
+                  io.emit(`download-complete-${downloadId}`, { 
+                    url: downloadUrl,
+                    filename: safeFilename 
+                  });
+
+                  await saveToHistory({ 
+                    id: downloadId, 
+                    ...metadata, 
+                    status: 'completed', 
+                    stage: 'completed',
+                    progress: 100,
+                    downloadUrl,
+                    completedAt: new Date().toLocaleString('zh-CN')
+                  });
+
+                  activeTasks.delete(downloadId);
+                  currentConcurrentFFmpeg--;
+                  resolve();
+                })
+                .save(outputPath);
+            });
+          }
+
           io.emit(`download-start-${downloadId}`, { message: '正在解析 M3U8 列表...' });
           sendLog('正在解析 M3U8 列表...');
 
@@ -377,6 +626,12 @@ async function startServer() {
       const batchSize = 5; // Download 5 segments at a time
       
       for (let i = 0; i < segments.length; i += batchSize) {
+        // Handle pause
+        while (activeTasks.get(downloadId)?.isPaused) {
+          if (activeTasks.get(downloadId)?.isCancelled) return;
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+
         if (activeTasks.get(downloadId)?.isCancelled) return;
 
         const batch = segments.slice(i, i + batchSize);
@@ -446,19 +701,6 @@ async function startServer() {
 
       if (activeTasks.get(downloadId)?.isCancelled) return;
 
-      // New: Wait for FFmpeg slot before merging/encoding
-      metadata.message = '等待 FFmpeg 队列...';
-      metadata.stage = 'merging';
-      io.emit(`download-progress-${downloadId}`, { percent: metadata.progress, message: '等待 FFmpeg 队列...', stage: 'merging' });
-      sendLog('已加入 FFmpeg 转码队列，正在等待空闲槽位...', 'warning');
-
-      while (currentConcurrentFFmpeg >= maxConcurrentFFmpeg) {
-        if (activeTasks.get(downloadId)?.isCancelled) return;
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
-
-      currentConcurrentFFmpeg++;
-
       // 3. Prepare FFmpeg concat list
       sendLog('正在配置 FFmpeg 分片合并...', 'info');
       // Keep progress at 100 from download phase instead of resetting to 0
@@ -466,7 +708,6 @@ async function startServer() {
       metadata.message = '配置合并阶段...';
       io.emit(`download-progress-${downloadId}`, { percent: 100, message: '配置合并阶段...', stage: 'merging' });
       
-      const concatListPath = path.join(taskTempDir, 'concat_list.txt');
       let concatListContent = '';
       
       for (let i = 0; i < segments.length; i++) {
@@ -481,168 +722,8 @@ async function startServer() {
       
       await fs.writeFile(concatListPath, concatListContent);
 
-      const command = ffmpeg();
-      command.input(concatListPath);
-      
-      const inputOptions = ['-f', 'concat', '-safe', '0'];
-
-      if (videoCodec === 'h264_vaapi') {
-        inputOptions.push('-hwaccel', 'vaapi', '-hwaccel_output_format', 'vaapi');
-        if (fs.existsSync('/dev/dri/renderD128')) {
-          inputOptions.push('-vaapi_device', '/dev/dri/renderD128');
-        }
-      }
-      
-      command.inputOptions(inputOptions);
-      
-      // Store command for cancellation
-      const taskEntry = activeTasks.get(downloadId);
-      if (taskEntry) {
-        taskEntry.ffmpegCommand = command;
-      }
-      
-      sendLog('正在启动 FFmpeg 进行视频转码/封装...', 'info');
-
-      // Optimization: Use all available CPU cores
-      command.outputOptions('-threads 0');
-
-      if (videoCodec === 'copy') {
-        command.outputOptions('-c copy');
-      } else {
-        // Optimization: Handle different codecs including GPU acceleration
-        if (videoCodec === 'h264_vaapi') {
-          // Linux VAAPI hardware acceleration (Intel/AMD on Linux)
-          command.videoCodec('h264_vaapi');
-          
-          if (useVfScale) {
-            command.videoFilters('scale_vaapi=w=1920:h=1080,format=vaapi');
-          } else {
-            command.videoFilters('format=vaapi|nv12');
-          }
-        } else {
-          command.videoCodec(videoCodec);
-          // Ensure compatibility with most players (for CPU encoding)
-          if (videoCodec === 'libx264' || videoCodec === 'libx265') {
-            command.outputOptions('-pix_fmt yuv420p');
-            command.outputOptions(`-preset ${videoPreset}`);
-          }
-        }
-
-        if (videoBitrate) {
-          const vb = /^\d+$/.test(videoBitrate) ? `${videoBitrate}k` : videoBitrate;
-          command.videoBitrate(vb);
-        }
-        
-        // Optimization: Ensure audio is AAC for MP4 compatibility if re-encoding
-        if (format === 'mp4') {
-          command.audioCodec('aac');
-        }
-
-        if (audioBitrate) {
-          const ab = /^\d+$/.test(audioBitrate) ? `${audioBitrate}k` : audioBitrate;
-          command.audioBitrate(ab);
-        }
-      }
-
-      // Optimization: Add faststart for MP4 to allow web playback before full download
-      if (format === 'mp4') {
-        command.outputOptions('-movflags +faststart');
-        if (videoCodec === 'copy') {
-          command.outputOptions('-bsf:a aac_adtstoasc');
-        }
-      }
-
-      command
-        .on('start', (commandLine) => {
-          sendLog(`FFmpeg 命令已启动`);
-          console.log('Spawned Ffmpeg for task: ' + commandLine);
-        })
-        .on('progress', (progress) => {
-          if (activeTasks.get(downloadId)?.isCancelled) return;
-          
-          let percent = progress.percent;
-          
-          // Fallback progress calculation if FFmpeg doesn't report it
-          if ((percent === undefined || percent <= 0) && metadata.totalDuration > 0) {
-            const timemark = progress.timemark; // HH:MM:SS.MS
-            const parts = timemark.split(':');
-            if (parts.length === 3) {
-              const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
-              percent = (seconds / metadata.totalDuration) * 100;
-            }
-          }
-          
-          const finalPercent = Math.min(99, Math.round(percent || 0));
-          metadata.progress = finalPercent;
-          metadata.timemark = progress.timemark || metadata.timemark;
-          metadata.message = videoCodec.includes('vaapi') ? '正在使用硬件加速转码...' : '正在进行视频转码/封装...';
-          
-          sendLog(`转码进度: ${finalPercent}% (时间点: ${progress.timemark})`);
-          io.emit(`download-progress-${downloadId}`, { 
-            percent: finalPercent,
-            message: metadata.message,
-            timemark: metadata.timemark,
-            stage: 'encoding'
-          });
-        })
-        .on('error', async (err, stdout, stderr) => {
-          if (activeTasks.get(downloadId)?.isCancelled) {
-            sendLog('任务已取消', 'warning');
-            await saveToHistory({ id: downloadId, ...metadata, status: 'cancelled' });
-            io.emit(`download-cancelled-${downloadId}`);
-            console.log(`Ffmpeg process for ${downloadId} was killed (cancelled)`);
-            return;
-          }
-
-          console.error('Merge error:', err.message);
-          if (stderr) {
-            console.error('FFmpeg stderr:', stderr);
-            sendLog(`FFmpeg 错误: ${stderr.split('\n').pop()}`, 'error');
-          }
-          const errorMsg = stderr ? stderr.split('\n').filter(l => l.trim()).pop() : err.message;
-          sendLog(`合并失败: ${errorMsg}`, 'error');
-          io.emit(`download-error-${downloadId}`, { error: `合并失败: ${errorMsg}` });
-          
-          metadata.progress = 0;
-          await saveToHistory({ 
-            id: downloadId, 
-            ...metadata, 
-            status: 'error', 
-            error: `合并失败: ${errorMsg}`,
-            completedAt: new Date().toLocaleString('zh-CN')
-          });
-
-          // Rely on background cleanup instead of immediate deletion to allow retries
-          // fs.remove(taskTempDir).catch(console.error);
-          activeTasks.delete(downloadId);
-          currentConcurrentFFmpeg--;
-          resolveTask();
-        })
-        .on('end', async () => {
-          console.log('Merge finished!');
-          const downloadUrl = `/downloads/${safeFilename}`;
-          io.emit(`download-complete-${downloadId}`, { 
-            url: downloadUrl,
-            filename: safeFilename 
-          });
-
-          await saveToHistory({ 
-            id: downloadId, 
-            ...metadata, 
-            status: 'completed', 
-            stage: 'completed',
-            progress: 100,
-            downloadUrl,
-            completedAt: new Date().toLocaleString('zh-CN')
-          });
-
-          // Rely on background cleanup
-          // await fs.remove(taskTempDir).catch(console.error);
-          activeTasks.delete(downloadId);
-          currentConcurrentFFmpeg--;
-          resolveTask();
-        })
-        .save(outputPath);
+      await gotoMergingPhase(segments.length);
+      resolveTask();
 
         } catch (err) {
           if (axios.isCancel(err) || abortController.signal.aborted || activeTasks.get(downloadId)?.isCancelled) {

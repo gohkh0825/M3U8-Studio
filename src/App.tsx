@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Download, Link as LinkIcon, FileVideo, CheckCircle2, AlertCircle, Loader2, Settings2, Trash2, Layers, Zap, ShieldCheck, ExternalLink, ArrowRight, Copy, X, List, CheckSquare, Plus, HelpCircle, ChevronLeft, ChevronRight, Search, RotateCcw } from 'lucide-react';
+import { Download, Link as LinkIcon, FileVideo, CheckCircle2, AlertCircle, Loader2, Settings2, Trash2, Layers, Zap, ShieldCheck, ExternalLink, ArrowRight, Copy, X, List, CheckSquare, Plus, HelpCircle, ChevronLeft, ChevronRight, Search, RotateCcw, Pause, Play } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -13,7 +13,7 @@ interface DownloadState {
   id: string;
   url: string;
   filename: string;
-  status: 'idle' | 'downloading' | 'completed' | 'error' | 'cancelled';
+  status: 'idle' | 'downloading' | 'completed' | 'error' | 'cancelled' | 'paused';
   progress: number;
   timemark: string;
   stage?: 'downloading' | 'merging' | 'encoding' | 'completed';
@@ -122,7 +122,8 @@ export default function App() {
           progress: update.percent || 0, 
           timemark: update.timemark || d.timemark,
           message: update.message || d.message,
-          stage: update.stage || d.stage
+          stage: update.stage || d.stage,
+          status: update.status || d.status
         } : d
       ));
     });
@@ -225,6 +226,30 @@ export default function App() {
   const [showCopyToast, setShowCopyToast] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [viewingLogId, setViewingLogId] = useState<string | null>(null);
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (viewingLogId) {
+      logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [viewingLogId, downloads.find(d => d.id === viewingLogId)?.logs]);
+
+  const parseFfmpegLog = (message: string) => {
+    const msg = message.toLowerCase();
+    
+    if (msg.includes('ffmpeg version')) return { type: 'version', icon: <Layers size={14} /> };
+    if (msg.includes('built with')) return { type: 'build', icon: <Layers size={14} /> };
+    if (msg.includes('configuration')) return { type: 'config', icon: <Settings2 size={14} /> };
+    if (msg.startsWith('stream #')) return { type: 'stream', icon: <ArrowRight size={14} /> };
+    if (msg.startsWith('metadata:') || msg.includes('duration:') || msg.includes('bitrate:')) return { type: 'metadata', icon: <FileVideo size={14} /> };
+    if (msg.includes('vaapi') || msg.includes('hardware') || msg.includes('hwaccel')) return { type: 'hardware', icon: <Zap size={14} /> };
+    if (msg.includes('frame=') || msg.includes('bitrate=') || msg.includes('speed=')) return { type: 'progress', icon: <Loader2 size={14} className="animate-spin-slow opacity-60" /> };
+    if (msg.includes('codec') || msg.includes('encoder')) return { type: 'codec', icon: <Layers size={14} /> };
+    if (msg.includes('input #') || msg.includes('output #')) return { type: 'io', icon: <ExternalLink size={14} /> };
+    if (msg.includes('error') || msg.includes('failed') || msg.includes('invalid') || msg.includes('could not')) return { type: 'error', icon: <AlertCircle size={14} /> };
+    
+    return { type: 'default', icon: null };
+  };
 
   const clearCompleted = () => {
     setDownloads(prev => prev.filter(d => d.status !== 'completed' && d.status !== 'error'));
@@ -301,6 +326,38 @@ export default function App() {
       setDownloads(prev => prev.filter(d => d.id !== id));
     } catch (err) {
       console.error('Failed to delete task:', err);
+    }
+  };
+
+  const pauseTask = async (id: string) => {
+    try {
+      const response = await fetch('/api/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ downloadId: id }),
+      });
+      if (!response.ok) {
+        const data = await response.json();
+        console.error('Failed to pause:', data.error);
+      }
+    } catch (err) {
+      console.error('Failed to pause task:', err);
+    }
+  };
+
+  const resumeTask = async (id: string) => {
+    try {
+      const response = await fetch('/api/resume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ downloadId: id }),
+      });
+      if (!response.ok) {
+        const data = await response.json();
+        console.error('Failed to resume:', data.error);
+      }
+    } catch (err) {
+      console.error('Failed to resume task:', err);
     }
   };
 
@@ -462,7 +519,7 @@ export default function App() {
             <Download className="text-white" size={18} />
           </div>
           <span className="text-lg font-bold tracking-tight">Media <span className="text-brand-400">Go</span></span>
-          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.0.9</span>
+          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.1.1</span>
         </div>
 
         <nav className="flex-1 px-4 py-4 space-y-2">
@@ -699,6 +756,7 @@ export default function App() {
                             {download.status === 'completed' ? <CheckCircle2 size={20} className="text-emerald-500" /> :
                              download.status === 'error' ? <AlertCircle size={20} className="text-rose-500" /> :
                              download.status === 'cancelled' ? <AlertCircle size={20} className="text-amber-500" /> :
+                             download.status === 'paused' ? <Pause size={20} className="text-amber-400" /> :
                              download.status === 'idle' ? <List size={20} className="text-slate-500" /> :
                              <Loader2 className="animate-spin text-brand-400" size={20} />}
                           </div>
@@ -726,6 +784,7 @@ export default function App() {
                                 <motion.div 
                                   className={`h-full ${
                                     download.status === 'completed' ? 'bg-emerald-500' : 
+                                    download.status === 'paused' ? 'bg-amber-400/50' : 
                                     (download.stage === 'merging' || download.stage === 'encoding') ? 'bg-amber-500' : 
                                     'bg-brand-500'
                                   }`}
@@ -752,6 +811,24 @@ export default function App() {
                             >
                               <List size={16} />
                             </button>
+                            {download.status === 'downloading' && download.stage === 'downloading' && (
+                              <button 
+                                onClick={() => pauseTask(download.id)}
+                                className="p-2 text-slate-400 hover:text-amber-400 transition-colors"
+                                title="暂停下载"
+                              >
+                                <Pause size={16} />
+                              </button>
+                            )}
+                            {download.status === 'paused' && (
+                              <button 
+                                onClick={() => resumeTask(download.id)}
+                                className="p-2 text-slate-400 hover:text-emerald-400 transition-colors"
+                                title="继续下载"
+                              >
+                                <Play size={16} />
+                              </button>
+                            )}
                             {(download.status === 'error' || download.status === 'cancelled') && (
                               <button 
                                 onClick={() => retryTask(download.id)}
@@ -1112,7 +1189,15 @@ export default function App() {
                     <List size={20} className="text-brand-400" />
                   </div>
                   <div>
-                    <h3 className="text-lg font-bold">任务日志</h3>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-lg font-bold">任务日志</h3>
+                      {downloads.find(d => d.id === viewingLogId)?.status === 'downloading' && (
+                        <span className="flex items-center gap-1.5 px-2 py-0.5 bg-brand-500/20 text-brand-400 rounded-full text-[10px] font-bold animate-pulse">
+                          <div className="w-1.5 h-1.5 bg-brand-400 rounded-full" />
+                          LIVE
+                        </span>
+                      )}
+                    </div>
                     <p className="text-xs text-slate-500 truncate max-w-[300px]">
                       {downloads.find(d => d.id === viewingLogId)?.filename}
                     </p>
@@ -1126,24 +1211,60 @@ export default function App() {
                 </button>
               </div>
               
-              <div className="flex-1 overflow-y-auto p-6 space-y-2 bg-black/20 font-mono text-[11px] custom-scrollbar">
+              <div className="flex-1 overflow-y-auto p-6 space-y-1.5 bg-slate-950 font-mono text-[11px] custom-scrollbar selection:bg-brand-500/30">
                 {downloads.find(d => d.id === viewingLogId)?.logs?.length ? (
-                  downloads.find(d => d.id === viewingLogId)?.logs?.map((log, i) => (
-                    <div key={i} className="flex gap-3 animate-in fade-in slide-in-from-left-2 duration-300">
-                      <span className="text-slate-600 shrink-0">[{log.timestamp}]</span>
-                      <span className={`
-                        ${log.type === 'error' ? 'text-rose-400' : 
-                          log.type === 'success' ? 'text-emerald-400' : 
-                          log.type === 'warning' ? 'text-amber-400' : 
-                          'text-slate-300'}
-                      `}>
-                        {log.message}
-                      </span>
-                    </div>
-                  ))
+                  <>
+                    {downloads.find(d => d.id === viewingLogId)?.logs?.map((log, i) => {
+                      const { type, icon } = parseFfmpegLog(log.message);
+                      const isError = log.type === 'error' || type === 'error';
+                      const isWarning = log.type === 'warning' || type === 'warning';
+                      const isSuccess = log.type === 'success' || type === 'success';
+                      const isSystem = type === 'hardware' || type === 'progress';
+
+                      return (
+                        <div key={i} className={`flex gap-3 px-2 py-1 rounded transition-colors group ${
+                          isError ? 'bg-rose-500/5 hover:bg-rose-500/10' :
+                          isWarning ? 'bg-amber-500/5 hover:bg-amber-500/10' :
+                          isSuccess ? 'bg-emerald-500/5 hover:bg-emerald-500/10' :
+                          isSystem ? 'bg-brand-500/5 hover:bg-brand-500/10' :
+                          'hover:bg-white/5'
+                        } animate-in fade-in slide-in-from-left-1 h-fit min-h-[1.5rem]`}>
+                          <span className="text-slate-600 shrink-0 select-none opacity-50 group-hover:opacity-100 transition-opacity">
+                            {log.timestamp.split(' ')[1] || log.timestamp}
+                          </span>
+                          
+                          {icon && (
+                            <span className={`shrink-0 mt-0.5 ${
+                              isError ? 'text-rose-400' :
+                              isWarning ? 'text-amber-400' :
+                              isSuccess ? 'text-emerald-400' :
+                              'text-brand-400'
+                            }`}>
+                              {icon}
+                            </span>
+                          )}
+
+                          <span className={`break-all leading-relaxed ${
+                            isError ? 'text-rose-300 font-medium' : 
+                            isWarning ? 'text-amber-300' : 
+                            isSuccess ? 'text-emerald-300 font-bold' : 
+                            type === 'metadata' ? 'text-slate-400 italic' :
+                            type === 'stream' ? 'text-indigo-300' :
+                            type === 'hardware' ? 'text-brand-300 font-bold' :
+                            type === 'progress' ? 'text-blue-300 opacity-80' :
+                            'text-slate-400'
+                          }`}>
+                            {log.message}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    <div ref={logEndRef} className="h-4" />
+                  </>
                 ) : (
-                  <div className="text-center py-20 text-slate-600 italic">
-                    暂无日志记录
+                  <div className="flex flex-col items-center justify-center py-24 text-slate-600">
+                    <Loader2 className="animate-spin mb-4 opacity-20" size={32} />
+                    <p className="text-sm font-medium italic">正在等待日志输出...</p>
                   </div>
                 )}
               </div>
