@@ -515,7 +515,7 @@ async function startServer() {
           command.videoCodec('h264_vaapi');
           
           if (useVfScale) {
-            command.videoFilters('format=nv12,scale=1920:1080,hwupload');
+            command.videoFilters('scale_vaapi=w=1920:h=1080,format=vaapi');
           } else {
             command.videoFilters('format=vaapi|nv12');
           }
@@ -591,89 +591,6 @@ async function startServer() {
             await saveToHistory({ id: downloadId, ...metadata, status: 'cancelled' });
             io.emit(`download-cancelled-${downloadId}`);
             console.log(`Ffmpeg process for ${downloadId} was killed (cancelled)`);
-            return;
-          }
-
-          // Fallback logic for unsupported codecs or hardware issues
-          const stderrStr = stderr || '';
-          const isHardwareErrorInfo = 
-            stderrStr.includes('Unknown encoder') || 
-            stderrStr.includes('Codec not found') || 
-            stderrStr.includes('Error while opening encoder') || 
-            stderrStr.includes('vaapi') ||
-            stderrStr.includes('VAAPI') ||
-            stderrStr.includes('device') ||
-            stderrStr.includes('hwupload') ||
-            err.message.includes('Unknown encoder');
-
-          if (isHardwareErrorInfo && videoCodec !== 'libx264') {
-            console.log(`Codec ${videoCodec} failed or hardware unavailable, falling back to libx264`);
-            sendLog(`检测到硬件编码器 ${videoCodec} 不可用或硬件访问受限，正在回退到 libx264 (CPU)...`, 'warning');
-            
-            // Restart FFmpeg with libx264
-            const retryCommand = ffmpeg();
-            retryCommand.input(concatListPath).inputOptions(['-f', 'concat', '-safe', '0']);
-            const currentTask = activeTasks.get(downloadId);
-            if (currentTask) currentTask.ffmpegCommand = retryCommand;
-            
-            retryCommand
-              .outputOptions('-threads 0')
-              .outputOptions('-pix_fmt yuv420p')
-              .videoCodec('libx264')
-              .outputOptions(`-preset ${videoPreset}`);
-              
-            if (videoBitrate) retryCommand.videoBitrate(videoBitrate);
-            
-            if (format === 'mp4') {
-              retryCommand.audioCodec('aac');
-              retryCommand.outputOptions('-movflags +faststart');
-            }
-            if (audioBitrate) retryCommand.audioBitrate(audioBitrate);
-            
-            retryCommand
-              .on('start', () => sendLog('回退重试: FFmpeg 已启动 (libx264)', 'info'))
-              .on('progress', (progress) => {
-                if (activeTasks.get(downloadId)?.isCancelled) return;
-                
-                let percent = progress.percent;
-                if ((percent === undefined || percent <= 0) && metadata.totalDuration > 0) {
-                  const parts = progress.timemark.split(':');
-                  if (parts.length === 3) {
-                    const seconds = (+parts[0]) * 3600 + (+parts[1]) * 60 + (+parts[2]);
-                    percent = (seconds / metadata.totalDuration) * 100;
-                  }
-                }
-                
-                const finalPercent = Math.min(99, Math.round(percent || 0));
-                metadata.timemark = progress.timemark;
-                io.emit(`download-progress-${downloadId}`, { 
-                  percent: finalPercent,
-                  message: `回退转码中: ${progress.timemark}`,
-                  stage: 'encoding'
-                });
-              })
-              .on('error', async (nestedErr, nStdout, nStderr) => {
-                 console.error('Fallback error:', nestedErr.message);
-                 const finalError = nStderr ? nStderr.split('\n').filter(l => l.trim()).pop() : nestedErr.message;
-                 sendLog(`转码失败 (回退后): ${finalError}`, 'error');
-                 io.emit(`download-error-${downloadId}`, { error: `转码失败: ${finalError}` });
-                 metadata.progress = 0;
-                 await saveToHistory({ id: downloadId, ...metadata, status: 'error', error: `转码失败: ${finalError}`, completedAt: new Date().toLocaleString('zh-CN') });
-                 activeTasks.delete(downloadId);
-                 currentConcurrentFFmpeg--;
-                 resolveTask();
-              })
-              .on('end', async () => {
-                console.log('Fallback processing finished!');
-                const downloadUrl = `/downloads/${safeFilename}`;
-                io.emit(`download-complete-${downloadId}`, { url: downloadUrl, filename: safeFilename });
-                await saveToHistory({ id: downloadId, ...metadata, status: 'completed', stage: 'completed', progress: 100, downloadUrl, completedAt: new Date().toLocaleString('zh-CN') });
-                activeTasks.delete(downloadId);
-                currentConcurrentFFmpeg--;
-                resolveTask();
-              })
-              .save(outputPath);
-              
             return;
           }
 

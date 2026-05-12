@@ -462,7 +462,7 @@ export default function App() {
             <Download className="text-white" size={18} />
           </div>
           <span className="text-lg font-bold tracking-tight">Media <span className="text-brand-400">Go</span></span>
-          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.0.6</span>
+          <span className="text-[10px] text-slate-500 mt-1 ml-auto">v3.0.9</span>
         </div>
 
         <nav className="flex-1 px-4 py-4 space-y-2">
@@ -724,7 +724,11 @@ export default function App() {
                             <div className="flex items-center gap-3">
                               <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
                                 <motion.div 
-                                  className={`h-full ${download.status === 'completed' ? 'bg-emerald-500' : 'bg-brand-500'}`}
+                                  className={`h-full ${
+                                    download.status === 'completed' ? 'bg-emerald-500' : 
+                                    (download.stage === 'merging' || download.stage === 'encoding') ? 'bg-amber-500' : 
+                                    'bg-brand-500'
+                                  }`}
                                   initial={{ width: 0 }}
                                   animate={{ width: `${download.progress}%` }}
                                 />
@@ -1009,7 +1013,7 @@ export default function App() {
                                 />
                                 <div>
                                   <p className="text-sm font-bold group-hover:text-slate-200 transition-colors">强制硬件压缩规模 (VAAPI)</p>
-                                  <p className="text-[10px] text-slate-500">添加 -vf "format=nv12,scale=1920:1080,hwupload" 强制 1080p 输出</p>
+                                  <p className="text-[10px] text-slate-500">添加 -vf "scale_vaapi=w=1920:h=1080,format=vaapi" 强制 1080p 输出</p>
                                 </div>
                               </label>
                             </div>
